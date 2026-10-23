@@ -14,6 +14,10 @@ from pydantic import BaseModel, Field, field_validator
 from hub.maintenance import MaintenanceSettings
 
 
+def _list(value: str | None) -> list[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
 def _bool(value: str | None, default: bool) -> bool:
     if value is None or value == "":
         return default
@@ -60,6 +64,41 @@ class Settings(BaseModel):
     log_file: Path | None = None
     log_max_mb: int = Field(default=20, ge=1, le=1000)
     log_backups: int = Field(default=10, ge=1, le=100)
+    # security hardening (phase 1)
+    data_key: str | None = None                 # encrypts TOTP secrets and backups
+    tls_cert_file: Path | None = None           # HTTPS directly from hub-api
+    tls_key_file: Path | None = None
+    session_idle_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    mfa_required_roles: list[str] = Field(default_factory=list)
+    password_max_age_days: int = Field(default=0, ge=0, le=3650)    # 0 = never expires
+    password_history: int = Field(default=3, ge=0, le=24)
+    rate_limit_per_min: int = Field(default=600, ge=10, le=100_000)  # per client address
+    allowed_networks: list[str] = Field(default_factory=list)       # empty = any address
+    allowed_origins: list[str] = Field(default_factory=list)        # browsers for /api/ws
+    cert_warn_days: int = Field(default=30, ge=1, le=365)
+
+    @field_validator("allowed_networks")
+    @classmethod
+    def _check_networks(cls, value: list[str]) -> list[str]:
+        import ipaddress
+
+        for net in value:
+            try:
+                ipaddress.ip_network(net, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"HUB_ALLOWED_NETWORKS: {net!r} is not an address/network")                     from exc
+        return value
+
+    @field_validator("data_key")
+    @classmethod
+    def _check_data_key(cls, value: str | None) -> str | None:
+        if value is not None and len(value) < 32:
+            raise ValueError("HUB_DATA_KEY must be at least 32 characters")
+        return value
+
+    @property
+    def tls(self) -> bool:
+        return self.tls_cert_file is not None and self.tls_key_file is not None
 
     @field_validator("timezone")
     @classmethod
@@ -84,7 +123,7 @@ class Settings(BaseModel):
             retention_raw_days=self.retention_raw_days,
             retention_hourly_days=self.retention_hourly_days, backup_dir=self.backup_dir,
             backup_time=self.backup_time, backup_keep=self.backup_keep, timezone=self.timezone,
-            pg_dump=self.pg_dump)
+            pg_dump=self.pg_dump, data_key=self.data_key)
 
     @field_validator("db_timescale")
     @classmethod
@@ -110,8 +149,7 @@ class Settings(BaseModel):
             lockout_minutes=int(e.get("HUB_LOCKOUT_MINUTES", 15)),
             password_min_length=int(e.get("HUB_PASSWORD_MIN_LENGTH", 10)),
             pending_write_minutes=int(e.get("HUB_PENDING_WRITE_MINUTES", 5)),
-            cors_origins=[o.strip() for o in e.get("HUB_CORS_ORIGINS", "").split(",")
-                          if o.strip()],
+            cors_origins=_list(e.get("HUB_CORS_ORIGINS")),
             host=e.get("HUB_HOST", "127.0.0.1"),
             port=int(e.get("HUB_PORT", 8000)),
             db_timescale=e.get("HUB_DB_TIMESCALE", "auto"),
@@ -136,6 +174,17 @@ class Settings(BaseModel):
             log_file=Path(e["HUB_LOG_FILE"]) if e.get("HUB_LOG_FILE") else None,
             log_max_mb=int(e.get("HUB_LOG_MAX_MB", 20)),
             log_backups=int(e.get("HUB_LOG_BACKUPS", 10)),
+            data_key=e.get("HUB_DATA_KEY") or (secret if dev else None),
+            tls_cert_file=Path(e["HUB_TLS_CERT"]) if e.get("HUB_TLS_CERT") else None,
+            tls_key_file=Path(e["HUB_TLS_KEY"]) if e.get("HUB_TLS_KEY") else None,
+            session_idle_minutes=int(e.get("HUB_SESSION_IDLE_MINUTES", 30)),
+            mfa_required_roles=_list(e.get("HUB_MFA_REQUIRED_ROLES")),
+            password_max_age_days=int(e.get("HUB_PASSWORD_MAX_AGE_DAYS", 0)),
+            password_history=int(e.get("HUB_PASSWORD_HISTORY", 3)),
+            rate_limit_per_min=int(e.get("HUB_RATE_LIMIT_PER_MIN", 600)),
+            allowed_networks=_list(e.get("HUB_ALLOWED_NETWORKS")),
+            allowed_origins=_list(e.get("HUB_ALLOWED_ORIGINS")),
+            cert_warn_days=int(e.get("HUB_CERT_WARN_DAYS", 30)),
         )
 
 

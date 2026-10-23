@@ -51,7 +51,9 @@ _QUALITY_BY_CODE = {v: k for k, v in QUALITY_CODES.items()}
 _INTEGER_TYPES = frozenset(INTEGER_RANGES)
 
 _USER_FIELDS = {"display_name", "password_hash", "is_active", "failed_logins", "locked_until",
-                "must_change_password", "language", "last_login_at"}
+                "must_change_password", "language", "last_login_at", "totp_secret_enc",
+                "totp_pending_enc", "totp_enabled", "totp_last_step", "recovery_codes",
+                "password_changed_at", "password_history"}
 
 
 def hour_origin(tz: str) -> datetime:
@@ -376,10 +378,11 @@ class PostgresStore:
         if not fields:
             return await self.get_user(user_id)
         assignments = ", ".join(f"{k}=%s" for k in fields)
+        values = [Jsonb(v) if isinstance(v, list | dict) else v for v in fields.values()]
         async with self._conn() as conn:
             row = await (await conn.execute(
                 f"UPDATE users SET {assignments} WHERE user_id=%s RETURNING *",  # noqa: S608
-                (*fields.values(), user_id))).fetchone()
+                (*values, user_id))).fetchone()
         return UserRecord.model_validate(row) if row else None
 
     async def role_permissions(self) -> dict[str, frozenset[str]]:
@@ -417,25 +420,40 @@ class PostgresStore:
 
     async def create_session(self, session_id: UUID, user_id: int, refresh_hash: str,
                              expires_at: datetime, client_addr: str | None,
-                             user_agent: str | None) -> None:
+                             user_agent: str | None, mfa: bool = False) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 "INSERT INTO sessions (session_id, user_id, refresh_hash, expires_at, "
-                "client_addr, user_agent) VALUES (%s,%s,%s,%s,%s,%s)",
-                (session_id, user_id, refresh_hash, expires_at, client_addr, user_agent))
+                "client_addr, user_agent, mfa) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (session_id, user_id, refresh_hash, expires_at, client_addr, user_agent, mfa))
+
+    async def touch_session(self, session_id: UUID, now: datetime) -> None:
+        """Record activity (at most once a minute per session, to keep writes low)."""
+        async with self._conn() as conn:
+            await conn.execute(
+                "UPDATE sessions SET last_seen_at=%s WHERE session_id=%s "
+                "AND last_seen_at < %s - interval '60 seconds'", (now, session_id, now))
+
+    async def get_mfa(self, user_id: int) -> dict[str, Any]:
+        async with self._conn() as conn:
+            row = await (await conn.execute(
+                "SELECT totp_secret_enc, totp_pending_enc, totp_enabled, totp_last_step, "
+                "recovery_codes, password_history FROM users WHERE user_id=%s",
+                (user_id,))).fetchone()
+        return dict(row) if row else {}
 
     async def get_session_by_hash(self, refresh_hash: str) -> SessionRecord | None:
         async with self._conn() as conn:
             row = await (await conn.execute(
-                "SELECT session_id, user_id, created_at, expires_at, revoked_at FROM sessions "
-                "WHERE refresh_hash=%s", (refresh_hash,))).fetchone()
+                "SELECT session_id, user_id, created_at, expires_at, revoked_at, last_seen_at, mfa "
+                "FROM sessions WHERE refresh_hash=%s", (refresh_hash,))).fetchone()
         return SessionRecord.model_validate(row) if row else None
 
     async def get_session(self, session_id: UUID) -> SessionRecord | None:
         async with self._conn() as conn:
             row = await (await conn.execute(
-                "SELECT session_id, user_id, created_at, expires_at, revoked_at FROM sessions "
-                "WHERE session_id=%s", (session_id,))).fetchone()
+                "SELECT session_id, user_id, created_at, expires_at, revoked_at, last_seen_at, mfa "
+                "FROM sessions WHERE session_id=%s", (session_id,))).fetchone()
         return SessionRecord.model_validate(row) if row else None
 
     async def revoke_session(self, session_id: UUID) -> None:
@@ -805,6 +823,14 @@ class PostgresStore:
                 "SELECT *, now() - last_heartbeat < interval '30 seconds' AS alive "
                 "FROM hub_nodes ORDER BY node_id")).fetchall()
         return [dict(r) for r in rows]
+
+    # --- audit chain ---------------------------------------------------------------------------
+
+    async def audit_verify(self, table: str) -> dict[str, Any]:
+        async with self._conn() as conn:
+            row = await (await conn.execute("SELECT * FROM audit_verify(%s)", (table,))
+                         ).fetchone()
+        return {"table": table, **dict(row), "ok": row["first_bad_id"] is None}
 
     # --- maintenance --------------------------------------------------------------------------
 

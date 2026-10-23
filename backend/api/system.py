@@ -77,6 +77,20 @@ async def write_audit(svc: ServicesDep, _: Auditor, tag: str | None = None,
                                             since=since, limit=limit)
 
 
+@router.get("/api/audit/verify")
+async def audit_verify(svc: ServicesDep, _: Auditor) -> dict[str, Any]:
+    """Check the hash chain of both audit tables now."""
+    return {t: await svc.store.audit_verify(t) for t in ("write_audit", "auth_audit")}
+
+
+@router.get("/api/system/certificates")
+async def certificates(svc: ServicesDep, _: Engineer) -> list[dict[str, Any]]:
+    """Certificates the hub uses, with their expiry."""
+    if svc.security_watch is None:
+        return []
+    return await svc.security_watch.check_certificates(utcnow())
+
+
 @router.get("/api/audit/auth", response_model=list[AuthAuditRecord])
 async def auth_audit(svc: ServicesDep, _: Auditor, event: str | None = None,
                      limit: Annotated[int, Query(ge=1, le=5000)] = 200) -> list[AuthAuditRecord]:

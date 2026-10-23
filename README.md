@@ -18,6 +18,7 @@ Project rules: [CLAUDE.md](CLAUDE.md). Backend details, API reference and operat
 | API | REST + WebSocket, config changes without restart, reports (Excel/CSV), dashboards storage | done |
 | Integration | OPC UA server for SCADA (encrypted, writes via the safety layer), Prometheus metrics | done |
 | Operations | Windows service (WinSW), rotating logs with redaction, active/standby HA | done |
+| Security hardening | HTTPS, MFA (TOTP), idle timeout, password history/expiry, network allowlist, rate limit, WebSocket origin check, encrypted backups, tamper-evident audit, certificate expiry alarms | done |
 | Web dashboard (fa/en, RTL) | | **not started** |
 
 Not verified yet: real field hardware, TimescaleDB-specific parts (tests skip without it), the
@@ -47,7 +48,7 @@ Then open http://127.0.0.1:8000/api/docs, log in with `POST /api/auth/login` and
 | Command | Purpose |
 |---|---|
 | `hub-api` | the backend: drivers, storage, alarms, control, HTTP/WebSocket API |
-| `hub-admin` | `migrate`, `create-admin`, `reset-password`, `unlock`, `list-users`, `backup`, `make-cert`, `service-config` |
+| `hub-admin` | `migrate`, `create-admin`, `reset-password`, `unlock`, `list-users`, `backup`, `decrypt-backup`, `make-cert`, `make-tls-cert`, `reset-mfa`, `verify-audit`, `service-config` |
 | `hub` | collector only: prints live values (commissioning), optional `--database-url` |
 | `hub-sim` | simulates every device of a config folder on 127.0.0.1 |
 | `python -m hub.validate_config` | checks `config/` (devices, brokers, alarms, control) |
@@ -59,7 +60,7 @@ config/          brokers.yaml, devices/*.yaml, alarms.yaml, control.yaml, notifi
 hub/             models, config loader, codec, drivers, alarm engine, runtime, storage
 backend/         FastAPI app, auth, RBAC, control-safety layer, server/admin CLIs
 simulators/      Modbus TCP server, MQTT broker + devices, OPC UA server, hub-sim
-db/migrations/   0001_core, 0002_timescale (optional), 0003_operations
+db/migrations/   0001_core, 0002_timescale (optional), 0003_operations, 0004_security
 scripts/windows/ install-service.ps1 / uninstall-service.ps1 (WinSW)
 docs/            backend.md, device_catalog.xlsx
 tests/           unit, drivers, storage, api, e2e (470+ tests, no hardware needed)

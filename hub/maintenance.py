@@ -1,14 +1,15 @@
 """Database housekeeping, run by the active hub node: hourly roll-up, retention, backups.
 
 * Roll-up (every 5 min): complete hours (in ``timezone``) of good numeric samples ->
-  ``samples_hourly``
-  (avg/min/max/first/last/n). The last 2 hours are recomputed so late samples are included.
+  ``samples_hourly`` (avg/min/max/first/last/n). The last 2 hours are recomputed so late samples are included.
   Averages are over *stored* samples (see hub/history.py), not time-weighted.
 * Retention (hourly): raw samples older than ``retention_raw_days`` and hourly rows older than
   ``retention_hourly_days`` are removed. Raw data is never removed before it was rolled up.
   With TimescaleDB whole chunks are dropped, otherwise rows are deleted in batches.
 * Backup (daily at ``backup_time`` in ``timezone``, when ``backup_dir`` is set): ``pg_dump
-  --format=custom``; the newest ``backup_keep`` files are kept. Restore with
+  --format=custom``; the newest ``backup_keep`` files are kept. With ``data_key``
+  (HUB_DATA_KEY) the dump is encrypted (``.dump.enc``, AES-256-GCM, see backend/crypto.py) and
+  the plain file is removed. Restore: ``hub-admin decrypt-backup`` (if encrypted), then
   ``pg_restore --clean --dbname <url> <file>``.
 """
 
@@ -47,6 +48,7 @@ class MaintenanceSettings:
     backup_keep: int = 14
     timezone: str = "Asia/Tehran"
     pg_dump: str | None = None
+    data_key: str | None = None      # encrypt backups when set
 
 
 def hour_floor(ts: datetime, tz: str = "UTC") -> datetime:
@@ -99,8 +101,19 @@ def backup_database(database_url: str, out_dir: Path, pg_dump: str | None = None
     return target
 
 
+def encrypt_backup(path: Path, data_key: str) -> Path:
+    """Encrypt a dump next to itself and delete the plain file."""
+    from backend.crypto import encrypt_file
+
+    target = path.with_name(path.name + ".enc")
+    encrypt_file(data_key, path, target)
+    path.unlink()
+    return target
+
+
 def prune_backups(out_dir: Path, keep: int) -> list[Path]:
-    files = sorted(out_dir.glob("hub-*.dump"), key=lambda p: p.name, reverse=True)
+    files = sorted([*out_dir.glob("hub-*.dump"), *out_dir.glob("hub-*.dump.enc")],
+                   key=lambda p: p.name, reverse=True)
     removed = files[keep:]
     for f in removed:
         f.unlink(missing_ok=True)
@@ -203,6 +216,8 @@ class Maintenance:
             path = await asyncio.to_thread(backup_database, self.database_url,
                                            self.settings.backup_dir, self.settings.pg_dump,
                                            self.clock())
+            if self.settings.data_key:
+                path = await asyncio.to_thread(encrypt_backup, path, self.settings.data_key)
             removed = prune_backups(self.settings.backup_dir, self.settings.backup_keep)
         except Exception as exc:  # noqa: BLE001
             log.error("backup failed: %s", exc)
@@ -212,5 +227,6 @@ class Maintenance:
         log.info("backup written: %s (%d bytes)", path, path.stat().st_size)
         await self.store.add_event("backup_ok", self.node_id,
                                    {"file": str(path), "bytes": path.stat().st_size,
+                                    "encrypted": path.suffix == ".enc",
                                     "pruned": [p.name for p in removed]})
         return path

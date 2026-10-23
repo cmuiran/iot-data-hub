@@ -6,6 +6,8 @@ What to check before onboarding common equipment. Source: `docs/device_catalog.x
 
 Phase column = when the hub can talk to it: **1** direct (Modbus TCP / MQTT / OPC UA), **2** needs a simple gateway (RS-485 → TCP, LoRaWAN → MQTT), **3** needs a protocol gateway (S7comm, FINS, EtherNet/IP, …) — out of scope until such a gateway exists.
 
+RS-485 / Modbus RTU devices marked "gateway" can also be read **directly** with `protocol: modbus_rtu` when the hub PC has a USB/RS-485 adapter (COM port) or an RFC 2217 serial server is on the line. Use the gateway route when the line is far from the hub or shared with other masters.
+
 Contents: PLCs · Drives · Meters and analysers · I/O and gateways · IoT · SCADA
 
 ## PLCs

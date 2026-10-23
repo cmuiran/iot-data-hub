@@ -40,6 +40,9 @@ def require(permission: str) -> Callable[..., Coroutine[Any, Any, Principal]]:
     async def _check(p: PrincipalDep) -> Principal:
         if p.user.must_change_password and permission != "self":
             raise Forbidden("change your password first", code="password_change_required")
+        if p.mfa_missing and permission != "self":
+            raise Forbidden("set up two-factor authentication first (/api/auth/mfa/setup)",
+                            code="mfa_enrollment_required")
         if permission != "self" and not p.can(permission):
             raise Forbidden(f"missing permission {permission}")
         return p

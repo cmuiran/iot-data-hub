@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -24,6 +25,7 @@ from backend.api import (
     ws,
 )
 from backend.errors import ApiError
+from backend.guards import NetworkAllowlist, RateLimiter
 from backend.services import Services
 
 log = logging.getLogger(__name__)
@@ -47,11 +49,26 @@ def create_app(services: Services) -> FastAPI:
                            allow_methods=["GET", "POST", "PATCH", "DELETE"],
                            allow_headers=["Authorization", "Content-Type"])
 
+    allowlist = NetworkAllowlist(services.settings.allowed_networks)
+    limiter = RateLimiter(services.settings.rate_limit_per_min)
+    app.state.limiter = limiter
+
     @app.middleware("http")
-    async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def guards(request: Request, call_next):  # type: ignore[no-untyped-def]
         path = request.url.path
-        if (services.role != "active" and path.startswith("/api/")
-                and path not in ("/api/health", "/api/docs", "/api/openapi.json")):
+        addr = request.client.host if request.client else None
+        guarded = path.startswith("/api/") or path == "/metrics"
+        if guarded and path != "/api/health" and not allowlist.allows(addr):
+            log.warning("request from %s refused: not in HUB_ALLOWED_NETWORKS", addr)
+            response: Any = JSONResponse({"error": "network_not_allowed",
+                                          "message": "this address may not use the hub"},
+                                         status_code=403)
+        elif guarded and path != "/api/health" and (wait := limiter.check(addr or "-")):
+            response = JSONResponse({"error": "rate_limited",
+                                     "message": "too many requests", "retry_after_s": wait},
+                                    status_code=429, headers={"Retry-After": str(wait)})
+        elif (services.role != "active" and path.startswith("/api/")
+              and path not in ("/api/health", "/api/docs", "/api/openapi.json")):
             # HA standby: no data, no logins, no writes; the load balancer uses the other node
             response = JSONResponse({"error": "standby", "message": f"node is {services.role}"},
                                     status_code=503)
@@ -59,6 +76,12 @@ def create_app(services: Services) -> FastAPI:
             response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
+        if not path.startswith("/api/docs"):  # Swagger UI needs its scripts
+            response.headers.setdefault("Content-Security-Policy",
+                                        "default-src 'none'; frame-ancestors 'none'")
+        if services.settings.tls:
+            response.headers.setdefault("Strict-Transport-Security",
+                                        "max-age=31536000; includeSubDomains")
         return response
 
     @app.exception_handler(ApiError)

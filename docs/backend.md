@@ -39,7 +39,9 @@ One process (`hub-api`) runs everything:
 | RBAC | roles `admin`, `engineer`, `operator`, `viewer`, each granted for everywhere / a site / a site+area. Default deny. `user.manage`, `config.edit`, `audit.read` need an unscoped grant. The last active global admin cannot be disabled or demoted |
 | Data scope | lists, details, history, alarms and the WebSocket only show tags/devices inside the user's `data.read` scopes; out-of-scope items answer 404 |
 | Audit | `write_audit` (every write attempt: `requested` + one outcome) and `auth_audit` (logins, lockouts, user/role changes, confirmations, alarm acks) are append-only (triggers refuse UPDATE/DELETE/TRUNCATE) |
-| Transport | `hub-api` listens on 127.0.0.1 by default. Put it behind a TLS reverse proxy (IIS/nginx/Caddy) before exposing it on the network |
+| Transport | `hub-api` listens on 127.0.0.1 by default. For the network use HTTPS: `HUB_TLS_CERT`/`HUB_TLS_KEY` (section 15) or a TLS reverse proxy |
+| MFA | TOTP (authenticator apps) with one-time recovery codes; required for the roles in `HUB_MFA_REQUIRED_ROLES` (section 15) |
+| Idle sessions | a session unused for `HUB_SESSION_IDLE_MINUTES` (30) ends |
 
 Permissions per role:
 
@@ -293,3 +295,27 @@ If the active node loses its database connection it stops all device traffic imm
 standby takes over within a few seconds; there are never two active nodes. Roles and heartbeats:
 `GET /api/system/nodes`; failovers: `GET /api/system/events?kind=failover`. Devices that allow
 only one Modbus TCP connection are only ever polled by the active node.
+
+## 15. Security hardening
+
+| Feature | Setting | Notes |
+|---|---|---|
+| HTTPS | `HUB_TLS_CERT`, `HUB_TLS_KEY` | `hub-admin make-tls-cert --name hub.kish.local --name 192.168.10.5` makes a self-signed certificate (import the `.crt.pem` into the operator PCs' trusted roots), or use one from the company CA. HSTS is sent when TLS is on. Without TLS on a non-local address the server logs a warning |
+| Two-factor login | `HUB_DATA_KEY`, `HUB_MFA_REQUIRED_ROLES` | `POST /api/auth/mfa/setup` (QR from `otpauth_uri`) → `POST /api/auth/mfa/enable {code}` (returns 10 one-time recovery codes, shown once). Login then answers `{mfa_required, mfa_token}`; finish with `POST /api/auth/mfa/verify {mfa_token, code}` or `{recovery_code}`. Codes cannot be replayed; wrong codes count towards the lockout. Users of a required role without MFA can only reach the MFA routes (`mfa_enrollment_required`). Lost phone: `POST /api/users/{id}/mfa/reset` or `hub-admin reset-mfa <user>` |
+| Idle timeout | `HUB_SESSION_IDLE_MINUTES` (30) | checked on every request and refresh; an open live dashboard keeps its session active |
+| Password lifecycle | `HUB_PASSWORD_HISTORY` (3), `HUB_PASSWORD_MAX_AGE_DAYS` (0 = off) | reused passwords are refused (`password_reused`); expired ones force a change at login |
+| Network allowlist | `HUB_ALLOWED_NETWORKS` | CIDR list for the API, WebSocket and /metrics (health stays open) |
+| Rate limit | `HUB_RATE_LIMIT_PER_MIN` (600) | per client address, 429 + Retry-After; behind a proxy configure uvicorn's `--forwarded-allow-ips` |
+| WebSocket origin | `HUB_ALLOWED_ORIGINS` | browsers may open `/api/ws` only from the hub's own host or listed origins |
+| Encrypted backups | `HUB_DATA_KEY` | backups become `hub-*.dump.enc` (AES-256-GCM, chunked, tamper-evident); `hub-admin decrypt-backup in out` before `pg_restore` |
+| Tamper-evident audit | – | both audit tables form a SHA-256 hash chain (migration 0004). `GET /api/audit/verify`, `hub-admin verify-audit`; the security watch verifies daily, stores the chain heads (`system_events` `audit_anchor`) and raises the critical alarm `system:audit` when the chain is broken |
+| Certificate expiry | `HUB_CERT_WARN_DAYS` (30) | HTTPS, OPC UA and device client certificates are checked daily; system alarm `system:cert:<file>` (high, critical when expired), cleared after renewal. `GET /api/system/certificates` |
+
+**Keep `HUB_DATA_KEY` safe.** It is not stored in the database. Losing it makes encrypted
+backups unreadable and every MFA enrolment unusable (reset MFA, users enrol again).
+
+What the code cannot do: Modbus has no security at all; keep field devices in a separate OT
+network (VLAN + firewall) that only the hub can reach. A database superuser can still rewrite the
+whole audit chain; the daily anchors in `system_events` and the log file are what reveal it, so
+ship the log file to a separate machine.
+

@@ -53,9 +53,12 @@ backend/
   notifications.py e-mail / Telegram / SMS / webhook; schedules.py + cron.py: scheduled writes
   reports.py       Period reports (Excel/CSV); opcua_server.py: OPC UA server output
   ha.py            Active/standby via a PostgreSQL advisory lock
+  totp.py, crypto.py  MFA codes; AES-GCM for TOTP secrets and backups (HUB_DATA_KEY)
+  guards.py        Network allowlist, rate limit, WebSocket origin check
+  security_watch.py Daily certificate-expiry and audit-chain checks (system alarms)
   server.py        `hub-api` (everything in one process); admin.py `hub-admin`
 simulators/        Modbus TCP server, MQTT broker + devices, OPC UA server; run.py = `hub-sim`
-db/migrations/     0001_core, 0002_timescale (optional), 0003_operations
+db/migrations/     0001_core, 0002_timescale (optional), 0003_operations, 0004_security
 scripts/windows/   Windows service install/uninstall (WinSW)
 frontend/          Web dashboard (not started)
 tests/             unit, drivers (vs simulators), storage/db (real PostgreSQL via pgserver),

@@ -8,6 +8,10 @@
     hub-admin backup --out backups [--keep 14]
     hub-admin make-cert --role client|server --name hub-client [--out pki] [--uri ...] [--host ...]
     hub-admin service-config --out scripts/windows/hub-api-service.xml [--account DOMAIN\\user]
+    hub-admin make-tls-cert --name hub.kish.local --name 192.168.10.5 [--out pki]
+    hub-admin reset-mfa <username>
+    hub-admin verify-audit
+    hub-admin decrypt-backup <file.dump.enc> <file.dump>
 
 Passwords are asked interactively (twice) or read from HUB_ADMIN_PASSWORD for automation.
 Database: HUB_DATABASE_URL, or ``--embedded-db DIR`` for the development database.
@@ -77,6 +81,35 @@ async def _reset(url: str, username: str, min_length: int, unlock_only: bool) ->
     return 0
 
 
+async def _reset_mfa(url: str, username: str) -> int:
+    async with PostgresStore(url, max_size=2) as store:
+        user = await store.get_user_by_username(username)
+        if user is None:
+            print(f"no user {username}", file=sys.stderr)
+            return 1
+        await store.update_user(user.user_id, totp_secret_enc=None, totp_pending_enc=None,
+                                totp_enabled=False, totp_last_step=None, recovery_codes=[])
+        await store.revoke_user_sessions(user.user_id)
+        await store.add_auth_audit("mfa_reset", username, user_id=user.user_id,
+                                   detail={"via": "hub-admin"})
+    print(f"MFA of {username} removed; they can enrol again after logging in")
+    return 0
+
+
+async def _verify_audit(url: str) -> int:
+    bad = 0
+    async with PostgresStore(url, max_size=2) as store:
+        for table in ("write_audit", "auth_audit"):
+            r = await store.audit_verify(table)
+            if r["ok"]:
+                print(f"{table}: OK, {r['checked']} rows, head {r['head_hash']}")
+            else:
+                bad += 1
+                print(f"{table}: BROKEN at id {r['first_bad_id']}: {r['problem']} "
+                      f"({r['checked']} rows verified before it)")
+    return 1 if bad else 0
+
+
 async def _list(url: str) -> int:
     async with PostgresStore(url, max_size=2) as store:
         for user in await store.list_users():
@@ -103,6 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     backup.add_argument("--out", type=Path, default=Path(os.environ.get("HUB_BACKUP_DIR",
                                                                          "backups")))
     backup.add_argument("--keep", type=int, default=int(os.environ.get("HUB_BACKUP_KEEP", 14)))
+    tls = sub.add_parser("make-tls-cert")
+    tls.add_argument("--name", action="append", required=True,
+                     help="host name or IP the browsers use (repeat for several)")
+    tls.add_argument("--out", type=Path, default=Path(os.environ.get("HUB_PKI_DIR", "pki")))
+    sub.add_parser("reset-mfa").add_argument("username")
+    sub.add_parser("verify-audit")
+    dec = sub.add_parser("decrypt-backup")
+    dec.add_argument("src", type=Path)
+    dec.add_argument("dst", type=Path)
     cert = sub.add_parser("make-cert")
     cert.add_argument("--role", choices=["client", "server"], required=True)
     cert.add_argument("--name", required=True)
@@ -114,6 +156,24 @@ def main(argv: list[str] | None = None) -> int:
     service.add_argument("--account", help="run as this Windows account (default LocalSystem)")
     args = parser.parse_args(argv)
 
+    if args.command == "make-tls-cert":  # needs no database
+        from hub.pki import make_tls_certificate
+
+        cert_path, key_path = make_tls_certificate(args.out, args.name)
+        print(f"HTTPS certificate: {cert_path}")
+        print(f"private key: {key_path} (keep it secret)")
+        print(f"set HUB_TLS_CERT={cert_path} and HUB_TLS_KEY={key_path}")
+        return 0
+    if args.command == "decrypt-backup":  # needs no database
+        from backend.crypto import decrypt_file
+
+        key = os.environ.get("HUB_DATA_KEY")
+        if not key:
+            print("set HUB_DATA_KEY (the key the backup was made with)", file=sys.stderr)
+            return 2
+        decrypt_file(key, args.src, args.dst)
+        print(f"decrypted: {args.dst} (restore with pg_restore)")
+        return 0
     if args.command == "make-cert":  # needs no database
         from hub.pki import application_uri, make_certificate
 
@@ -150,10 +210,18 @@ def main(argv: list[str] | None = None) -> int:
         from hub.maintenance import backup_database, prune_backups
 
         path = backup_database(url, args.out, os.environ.get("HUB_PG_DUMP"))
+        if os.environ.get("HUB_DATA_KEY"):
+            from hub.maintenance import encrypt_backup
+
+            path = encrypt_backup(path, os.environ["HUB_DATA_KEY"])
         removed = prune_backups(args.out, args.keep)
         print(f"backup written: {path} ({path.stat().st_size} bytes)"
               + (f"; removed {len(removed)} old file(s)" if removed else ""))
         return 0
+    if args.command == "reset-mfa":
+        return run(_reset_mfa(url, args.username.lower()))
+    if args.command == "verify-audit":
+        return run(_verify_audit(url))
     if args.command in ("reset-password", "unlock"):
         return run(_reset(url, args.username.lower(), min_length, args.command == "unlock"))
     return run(_list(url))

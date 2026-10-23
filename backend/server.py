@@ -79,9 +79,18 @@ async def serve(settings: Settings) -> int:
                         "'hub-admin create-admin --username admin'")
         if not settings.control_enabled:
             log.info("control is disabled (HUB_CONTROL_ENABLED=false): writes are refused")
+        tls: dict[str, str] = {}
+        if settings.tls:
+            tls = {"ssl_certfile": str(settings.tls_cert_file),
+                   "ssl_keyfile": str(settings.tls_key_file)}
+            log.info("HTTPS enabled (%s)", settings.tls_cert_file)
+        elif settings.host not in ("127.0.0.1", "localhost", "::1"):
+            log.warning("hub-api listens on %s without TLS: passwords and tokens cross the "
+                        "network unencrypted. Set HUB_TLS_CERT/HUB_TLS_KEY or put a TLS reverse "
+                        "proxy in front", settings.host)
         config = uvicorn.Config(create_app(services), host=settings.host, port=settings.port,
                                 loop="none", lifespan="off", log_level="info",
-                                proxy_headers=True, ws="websockets-sansio")
+                                proxy_headers=True, ws="websockets-sansio", **tls)
         await uvicorn.Server(config).serve()
     finally:
         if ha is not None:

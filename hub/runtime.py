@@ -326,6 +326,13 @@ class Hub:
         self.bus.publish(event)
         await self._notify(event)
 
+    async def raise_system_alarm(self, alarm: AlarmRaise) -> None:
+        """Alarms about the hub itself (``system:...`` sources: certificates, audit, ...)."""
+        await self._raise_alarm(alarm)
+
+    async def clear_system_alarm(self, source: str, ts: datetime) -> None:
+        await self._clear_alarm(source, ts)
+
     async def _notify(self, event: dict[str, Any]) -> None:
         for listener in list(self.alarm_listeners):
             try:

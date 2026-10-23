@@ -66,6 +66,7 @@ class UserOut(BaseModel):
     last_login_at: datetime | None
     created_at: datetime
     roles: list[GrantOut]
+    mfa_enabled: bool = False
 
 
 def _grant_out(g: RoleGrant) -> GrantOut:
@@ -74,8 +75,10 @@ def _grant_out(g: RoleGrant) -> GrantOut:
 
 
 async def _user_out(svc: ServicesDep, user: UserRecord) -> UserOut:
-    return UserOut(**user.model_dump(include=set(UserOut.model_fields) - {"roles"}),
-                   roles=[_grant_out(g) for g in await svc.store.grants(user.user_id)])
+    return UserOut(**user.model_dump(include=set(UserOut.model_fields)
+                                     - {"roles", "mfa_enabled"}),
+                   roles=[_grant_out(g) for g in await svc.store.grants(user.user_id)],
+                   mfa_enabled=user.totp_enabled)
 
 
 async def _get(svc: ServicesDep, user_id: int) -> UserRecord:
@@ -164,13 +167,17 @@ async def update_user(user_id: int, body: UserPatch, request: Request, svc: Serv
 async def reset_password(user_id: int, body: PasswordReset, request: Request, svc: ServicesDep,
                          p: Admin) -> None:
     user = await _get(svc, user_id)
-    svc.auth.check_password(body.new_password, user.username)
-    await svc.store.update_user(user_id, password_hash=hash_password(body.new_password),
-                                must_change_password=True, failed_logins=0, locked_until=None)
+    await svc.auth.set_password(user, body.new_password, must_change=True)
     await svc.store.revoke_user_sessions(user_id)
     await svc.store.add_auth_audit("password_changed", user.username, user_id=user_id,
                                    actor_id=p.user_id, client_addr=client_addr(request),
                                    detail={"reset_by_admin": True})
+
+
+@router.post("/api/users/{user_id}/mfa/reset", status_code=204)
+async def reset_mfa(user_id: int, request: Request, svc: ServicesDep, p: Admin) -> None:
+    """The user lost the authenticator: remove MFA and end their sessions."""
+    await svc.auth.mfa_reset(await _get(svc, user_id), p, client_addr(request))
 
 
 @router.post("/api/users/{user_id}/unlock", status_code=204)

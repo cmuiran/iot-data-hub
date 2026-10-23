@@ -33,6 +33,7 @@ class Services:
     scheduler: Scheduler | None = None
     opcua_server: Any = None
     role: str = "active"     # "standby" on the passive node of an HA pair
+    security_watch: Any = None
 
     def __post_init__(self) -> None:
         from backend.config_admin import ConfigAdmin
@@ -45,6 +46,10 @@ class Services:
         self.hub.alarm_listeners.append(self.notifier.on_alarm)
         if self.scheduler is None:
             self.scheduler = Scheduler(self)
+        if self.security_watch is None:
+            from backend.security_watch import SecurityWatch
+
+            self.security_watch = SecurityWatch(self)
         if self.opcua_server is None and self.settings.opcua_server:
             from backend.opcua_server import HubOpcUaServer
 
@@ -73,6 +78,8 @@ class Services:
             await self.scheduler.start()
         if self.opcua_server is not None:
             await self.opcua_server.start()
+        if self.security_watch is not None:
+            await self.security_watch.start()
         if self.maintenance is not None:
             await self.maintenance.start()
 
@@ -114,6 +121,8 @@ class Services:
 
     async def stop(self) -> None:
         """Stop everything that talks to devices (also used to demote an HA node)."""
+        if self.security_watch is not None:
+            await self.security_watch.stop()
         if self.opcua_server is not None:
             await self.opcua_server.stop()
         if self.scheduler is not None:

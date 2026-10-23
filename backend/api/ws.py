@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.errors import ApiError
+from backend.guards import NetworkAllowlist, origin_allowed
 from backend.rbac import Principal, split_path
 from backend.services import Services
 
@@ -89,6 +90,12 @@ async def _snapshot(svc: Services, f: _Filter) -> dict[str, Any]:
 @router.websocket("/api/ws")
 async def live(ws: WebSocket) -> None:
     svc: Services = ws.app.state.services
+    addr = ws.client.host if ws.client else None
+    if not NetworkAllowlist(svc.settings.allowed_networks).allows(addr) or not origin_allowed(
+            ws.headers.get("origin"), ws.headers.get("host"), svc.settings):
+        log.warning("websocket from %s (origin %s) refused", addr, ws.headers.get("origin"))
+        await ws.close(code=4403)
+        return
     await ws.accept()
     if svc.role != "active":   # HA standby: the client should reconnect to the active node
         await ws.close(code=1013)
@@ -98,6 +105,8 @@ async def live(ws: WebSocket) -> None:
         if not isinstance(first, dict) or first.get("type") != "auth" or not first.get("token"):
             raise ApiError("first message must be auth")
         principal = await svc.auth.principal(str(first["token"]))
+        if principal.mfa_missing or principal.user.must_change_password:
+            raise ApiError("finish MFA enrolment / password change first")
     except (TimeoutError, ApiError, ValueError, json.JSONDecodeError, WebSocketDisconnect):
         with contextlib.suppress(Exception):
             await ws.close(code=4401)

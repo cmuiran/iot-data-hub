@@ -68,6 +68,8 @@ class UserRecord(_Record):
     language: str
     created_at: datetime
     last_login_at: datetime | None
+    totp_enabled: bool = False
+    password_changed_at: datetime | None = None
 
 
 class RoleGrant(_Record):
@@ -86,6 +88,8 @@ class SessionRecord(_Record):
     created_at: datetime
     expires_at: datetime
     revoked_at: datetime | None
+    last_seen_at: datetime | None = None
+    mfa: bool = False
 
 
 class WriteAuditRecord(_Record):

@@ -13,6 +13,7 @@ with the URI the application announces, so the driver takes it from the certific
 from __future__ import annotations
 
 import socket
+from datetime import datetime
 from pathlib import Path
 
 from cryptography import x509
@@ -35,6 +36,59 @@ async def make_certificate(directory: Path, name: str, role: str, *, uri: str | 
         key, cert, uri or DEFAULT_URIS[role], hostname or socket.gethostname(), use,
         {"countryName": "IR", "organizationName": "IoT Data Hub", "commonName": name})
     return cert, key
+
+
+def make_tls_certificate(directory: Path, names: list[str], *, days: int = 825,
+                         name: str = "hub-https") -> tuple[Path, Path]:
+    """Self-signed HTTPS certificate (PEM) for hub-api on an internal network.
+
+    ``names`` are host names and/or IP addresses the browser will use. Browsers warn about a
+    self-signed certificate until it is trusted (import the .pem into the Windows certificate
+    store of the operator PCs) — or use a certificate from the company CA instead.
+    """
+    import datetime as dt
+    import ipaddress
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    if not names:
+        raise ValueError("give at least one host name or IP address")
+    directory.mkdir(parents=True, exist_ok=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    alt: list[x509.GeneralName] = []
+    for n in names:
+        try:
+            alt.append(x509.IPAddress(ipaddress.ip_address(n)))
+        except ValueError:
+            alt.append(x509.DNSName(n))
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, names[0]),
+                         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "IoT Data Hub")])
+    now = dt.datetime.now(dt.UTC)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(days=days))
+            .add_extension(x509.SubjectAlternativeName(alt), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                           critical=False)
+            .sign(key, hashes.SHA256()))
+    cert_path, key_path = directory / f"{name}.crt.pem", directory / f"{name}.key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    return cert_path, key_path
+
+
+def certificate_expiry(cert_path: Path | str) -> datetime:
+    """Expiry (aware UTC) of a DER or PEM certificate."""
+    data = Path(cert_path).read_bytes()
+    cert = (x509.load_pem_x509_certificate(data) if data.startswith(b"-----BEGIN")
+            else x509.load_der_x509_certificate(data))
+    return cert.not_valid_after_utc
 
 
 def application_uri(cert_path: Path | str) -> str | None:

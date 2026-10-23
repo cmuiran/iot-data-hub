@@ -37,6 +37,7 @@ class Principal:
     session_id: object
     grants: tuple[RoleGrant, ...]
     role_permissions: dict[str, frozenset[str]]
+    mfa_missing: bool = False        # a role requires MFA but the user has not enrolled yet
 
     @property
     def user_id(self) -> int:

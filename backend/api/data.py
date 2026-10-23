@@ -201,7 +201,8 @@ def _alarm_visible(svc: ServicesDep, p: Principal, alarm: AlarmRecord) -> bool:
         d = svc.hub.devices[alarm.device_id]
         site, area = d.site, d.area
     else:
-        return p.can("data.read", None)  # device gone from config: anyone who reads data
+        # system alarms (certificates, audit) and devices gone from config: anyone who reads
+        return p.can("data.read", None)
     return _visible(p, site, area)
 
 

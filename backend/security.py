@@ -70,6 +70,25 @@ def decode_access_token(token: str, secret: str) -> tuple[int, UUID]:
         raise TokenError("malformed token") from exc
 
 
+def make_mfa_token(user_id: int, secret: str, now: datetime, minutes: int = 5) -> str:
+    """Short-lived proof that the password was right; exchanged for tokens with a TOTP code."""
+    payload = {"sub": str(user_id), "iss": _ISSUER, "iat": int(now.timestamp()),
+               "exp": int((now + timedelta(minutes=minutes)).timestamp()), "typ": "mfa",
+               "jti": secrets.token_hex(8)}
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def decode_mfa_token(token: str, secret: str) -> int:
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"], issuer=_ISSUER,
+                             options={"require": ["exp", "sub", "iss"]})
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if payload.get("typ") != "mfa":
+        raise TokenError("not an MFA token")
+    return int(payload["sub"])
+
+
 def new_refresh_token() -> tuple[str, str]:
     """(token for the client, SHA-256 hex stored in the database)."""
     token = secrets.token_urlsafe(48)

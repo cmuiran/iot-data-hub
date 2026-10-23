@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from backend.auth import MfaChallenge, TokenPair
 from backend.deps import PrincipalDep, ServicesDep, client_addr, require
 from backend.errors import NotFound
 from backend.rbac import Principal
@@ -45,24 +46,80 @@ class MeOut(BaseModel):
     display_name: str
     language: str
     must_change_password: bool
+    mfa_enabled: bool
+    mfa_enrollment_required: bool
     roles: list[dict[str, str | None]]
     permissions: dict[str, list[dict[str, str | None]]]
 
 
-@router.post("/login", response_model=TokenOut)
-async def login(body: LoginIn, request: Request, svc: ServicesDep) -> TokenOut:
-    pair = await svc.auth.login(body.username, body.password, client_addr(request),
-                                request.headers.get("user-agent"))
+class MfaChallengeOut(BaseModel):
+    mfa_required: bool = True
+    mfa_token: str
+    expires_in: int
+
+
+class MfaVerifyIn(BaseModel):
+    mfa_token: str = Field(min_length=10, max_length=1000)
+    code: str | None = Field(default=None, max_length=10)
+    recovery_code: str | None = Field(default=None, max_length=20)
+
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=10)
+
+
+class MfaDisableIn(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str = Field(min_length=6, max_length=10)
+
+
+def _tokens(pair: TokenPair) -> TokenOut:
     return TokenOut(access_token=pair.access_token, refresh_token=pair.refresh_token,
                     expires_in=pair.expires_in, must_change_password=pair.must_change_password)
+
+
+@router.post("/login", response_model=TokenOut | MfaChallengeOut)
+async def login(body: LoginIn, request: Request, svc: ServicesDep) -> TokenOut | MfaChallengeOut:
+    """Password step. With MFA enabled the answer is ``{mfa_required, mfa_token}``: send the
+    token with a 6-digit code (or a recovery code) to /api/auth/mfa/verify."""
+    result = await svc.auth.login(body.username, body.password, client_addr(request),
+                                  request.headers.get("user-agent"))
+    if isinstance(result, MfaChallenge):
+        return MfaChallengeOut(mfa_token=result.mfa_token, expires_in=result.expires_in)
+    return _tokens(result)
+
+
+@router.post("/mfa/verify", response_model=TokenOut)
+async def mfa_verify(body: MfaVerifyIn, request: Request, svc: ServicesDep) -> TokenOut:
+    return _tokens(await svc.auth.verify_mfa(body.mfa_token, body.code, body.recovery_code,
+                                             client_addr(request),
+                                             request.headers.get("user-agent")))
+
+
+@router.post("/mfa/setup")
+async def mfa_setup(svc: ServicesDep, p: Annotated[Principal, Depends(require("self"))]
+                    ) -> dict[str, str]:
+    """Start enrolment: show ``otpauth_uri`` as a QR code (or type ``secret`` into the app)."""
+    return await svc.auth.mfa_setup(p)
+
+
+@router.post("/mfa/enable")
+async def mfa_enable(body: MfaCodeIn, request: Request, svc: ServicesDep,
+                     p: Annotated[Principal, Depends(require("self"))]) -> dict[str, list[str]]:
+    """Confirm with the first code. The recovery codes are shown only this once."""
+    return {"recovery_codes": await svc.auth.mfa_enable(p, body.code, client_addr(request))}
+
+
+@router.post("/mfa/disable", status_code=204)
+async def mfa_disable(body: MfaDisableIn, request: Request, svc: ServicesDep,
+                      p: Annotated[Principal, Depends(require("self"))]) -> None:
+    await svc.auth.mfa_disable(p, body.password, body.code, client_addr(request))
 
 
 @router.post("/refresh", response_model=TokenOut)
 async def refresh(body: RefreshIn, request: Request, svc: ServicesDep) -> TokenOut:
-    pair = await svc.auth.refresh(body.refresh_token, client_addr(request),
-                                  request.headers.get("user-agent"))
-    return TokenOut(access_token=pair.access_token, refresh_token=pair.refresh_token,
-                    expires_in=pair.expires_in, must_change_password=pair.must_change_password)
+    return _tokens(await svc.auth.refresh(body.refresh_token, client_addr(request),
+                                          request.headers.get("user-agent")))
 
 
 @router.post("/logout", status_code=204)
@@ -74,6 +131,7 @@ async def logout(p: PrincipalDep, request: Request, svc: ServicesDep) -> None:
 async def me(p: Annotated[Principal, Depends(require("self"))]) -> MeOut:
     return MeOut(user_id=p.user_id, username=p.username, display_name=p.user.display_name,
                  language=p.user.language, must_change_password=p.user.must_change_password,
+                 mfa_enabled=p.user.totp_enabled, mfa_enrollment_required=p.mfa_missing,
                  roles=[{"role": g.role_id, "site": g.site, "area": g.area} for g in p.grants],
                  permissions=p.effective())
 

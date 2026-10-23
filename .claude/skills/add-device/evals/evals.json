@@ -81,7 +81,9 @@
       "id": 7,
       "name": "bulk-excel",
       "prompt": "Import the devices in this workbook.",
-      "files": ["evals/files/devices.xlsx"],
+      "files": [
+        "evals/files/devices.xlsx"
+      ],
       "expected_output": "scripts/excel_to_devices.py is used with --dry-run then --check; 5 devices (meter_03, vfd_01, gate_counter_01, env_sensor_03, plc_02); vfd_01 is written disabled with host todo.invalid; meter_03.frequency is skipped as TODO; the report lists TODOs and writable tags from the script output.",
       "expectations": [
         "The script is run (not hand-written YAML)",
@@ -90,6 +92,32 @@
         "vfd_01 is enabled: false with host todo.invalid",
         "Both writable meter_03 tags are listed as warnings in the report",
         "The final validator run has no ERROR"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "modbus-rtu-on-com-port",
+      "prompt": "Two Selec MFM384 meters are on one RS-485 adapter on COM4 of the hub PC, 9600 baud, even parity. Slave addresses 5 and 6. From the manual: 30001 voltage L1 float32 V, 30015 frequency float32 Hz. Area substation. Voltage changes a lot, store it only when it moves more than 0.5 V.",
+      "expected_output": "Two modbus_rtu devices on port COM4 with identical line settings (9600, parity E), unit_id 5 and 6, input registers 0 and 14, history_deadband 0.5 on voltage; validator OK.",
+      "expectations": [
+        "protocol is modbus_rtu (not modbus_tcp)",
+        "both devices have port COM4, baudrate 9600, parity E",
+        "unit_id 5 and 6",
+        "addresses 0 and 14 as input registers",
+        "voltage has history_deadband 0.5; frequency has none",
+        "validator shows no ERROR"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "mqtt-without-lwt",
+      "prompt": "Add the ESP32 gate radar node. It publishes {\"t\": 1767225600, \"targets\": 2, \"temp\": 41.2} every 10 seconds to kish/gate/radar_01/state. It has no last-will / status topic.",
+      "expected_output": "mqtt device with stale_after_s about 30 (3x the publish interval), timestamp_path $.t unix_s, tags targets (integer) and temp (float32); no validator warning about stale_after_s.",
+      "expectations": [
+        "stale_after_s is set (roughly 3x 10 s)",
+        "timestamp_path $.t with unix_s",
+        "targets is an integer type and temp is float32",
+        "the report mentions why stale_after_s was set"
       ]
     }
   ]
