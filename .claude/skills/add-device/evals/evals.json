@@ -1,0 +1,96 @@
+{
+  "skill_name": "add-device",
+  "notes": "Run with the skill-creator skill against a scratch copy of the project (config/ is modified). Every scenario must end with `python -m hub.validate_config` showing no new ERROR.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "modbus-modicon-meter",
+      "prompt": "Add an energy meter at site kish, area gate, IP 192.168.10.31, unit 1. Registers: 30001 Voltage L1 float32 V, 30007 Current L1 float32 A, 30053 Total active power float32 W, 33204 Active energy int64 Wh. Low word first.",
+      "expected_output": "config/devices/meter_02.yaml (next free counter) with input registers at addresses 0, 6, 52, 3203, word_order little, units kept as given (W, Wh), validator OK.",
+      "expectations": [
+        "Addresses are converted from Modicon notation: 0, 6, 52 and 3203, all register_type input",
+        "energy tag uses data_type int64 (not skipped, not uint32)",
+        "word_order is little and byte_order is left at the default",
+        "Units are W and Wh exactly as stated, not converted to kW/kWh",
+        "No tag is read_write",
+        "The validator is run and the report table lists all four tags"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "mqtt-payload-with-timestamp",
+      "prompt": "سنسور دما و رطوبت روی تاپیک kish/gate/th-01/data این رو می‌فرسته: {\"ts\":1767225600,\"data\":{\"t\":24.6,\"h\":51},\"bat\":87}",
+      "expected_output": "An mqtt device on plant_broker with telemetry_topic kish/gate/th-01/data, timestamp_path $.ts / timestamp_format unix_s, tags temperature (float32 degC), humidity (float32 %), battery_level (integer %), reply in Persian.",
+      "expectations": [
+        "telemetry_topic is exactly kish/gate/th-01/data",
+        "timestamp_path is $.ts and timestamp_format is unix_s; ts is not a tag",
+        "humidity is float32 even though the sample value 51 is whole",
+        "battery level is an integer type",
+        "device_id follows the repo pattern (env_sensor_NN) and th-01 is kept in the description",
+        "The reply to the user is in Persian; file contents are English",
+        "Inferred units are marked as inferred"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "drive-status-bits-behind-gateway",
+      "prompt": "Add the ABB ACS580 pump drive. It's on RS-485 behind the Moxa MGate at 192.168.10.40 port 502, slave address 5. From the manual: holding register 40001 = status word (bit 0 ready, bit 1 running, bit 3 fault), 40102 = output frequency, 0.01 Hz per count, unsigned.",
+      "expected_output": "A modbus_tcp device with host 192.168.10.40, unit_id 5, a uint16 status_word at holding 0, bool tags with bit 0/1/3 on holding 0, output_frequency uint16 at holding 101 with scale 0.01 Hz; gateway mentioned in description.",
+      "expectations": [
+        "unit_id is 5 and host is the gateway address",
+        "Status flags are bool tags with register_type holding, address 0 and bit 0, 1 and 3",
+        "Bit tags are read-only",
+        "output_frequency has scale 0.01 and unit Hz",
+        "The description names the Moxa gateway",
+        "The report warns that bit numbering (0 = LSB) should be checked against a live state"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "collision-is-asked-not-dodged",
+      "prompt": "Add a power meter at 192.168.10.21 unit 1, registers 30001 voltage float32 V.",
+      "expected_output": "The skill notices that meter_01 already uses 192.168.10.21:502 unit 1 and asks whether this is a re-add or a typo, citing meter_01's area and map; it does not change the IP or unit id on its own.",
+      "expectations": [
+        "The collision with meter_01 is detected before writing",
+        "The user is asked (or, if unattended, the file is written with enabled: false and a TODO)",
+        "host and unit_id are not altered to avoid the collision"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "missing-info-no-invention",
+      "prompt": "Add the Siemens S7-1200 in the pump station. I don't have the register list yet, IP is 192.168.10.60.",
+      "expected_output": "The skill explains that the S7-1200 Modbus map comes from the MB_SERVER block and asks for it from the PLC programmer; it asks for the unit id; it does not invent registers. If it writes a file, it has no tags and lists TODOs.",
+      "expectations": [
+        "No register address is invented",
+        "The answer mentions MB_SERVER / the PLC programmer as the source of the map",
+        "Missing values are asked for in one message"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "out-of-scope-sparkplug",
+      "prompt": "Add our Ignition gateway; it publishes Sparkplug B on spBv1.0/kish/#.",
+      "expected_output": "The skill explains Sparkplug B is binary protobuf and not supported by the mqtt JSON driver; suggests OPC UA from Ignition instead; writes no mqtt device.",
+      "expectations": [
+        "No mqtt device file is written for the Sparkplug topic",
+        "OPC UA is offered as the supported path"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "bulk-excel",
+      "prompt": "Import the devices in this workbook.",
+      "files": ["evals/files/devices.xlsx"],
+      "expected_output": "scripts/excel_to_devices.py is used with --dry-run then --check; 5 devices (meter_03, vfd_01, gate_counter_01, env_sensor_03, plc_02); vfd_01 is written disabled with host todo.invalid; meter_03.frequency is skipped as TODO; the report lists TODOs and writable tags from the script output.",
+      "expectations": [
+        "The script is run (not hand-written YAML)",
+        "--dry-run runs before the real import",
+        "meter_03 relay is a coil at address 0 (the text-typed 00001) and demand_limit is holding 100 with scale 0.1",
+        "vfd_01 is enabled: false with host todo.invalid",
+        "Both writable meter_03 tags are listed as warnings in the report",
+        "The final validator run has no ERROR"
+      ]
+    }
+  ]
+}

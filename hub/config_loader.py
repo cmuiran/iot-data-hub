@@ -1,0 +1,645 @@
+"""Load the configuration directory and validate it as a whole.
+
+Layout::
+
+    config/
+      brokers.yaml          MQTT brokers (list under ``brokers:``)
+      devices/<device_id>.yaml   one device per file
+
+Each file is validated with the models in ``hub.models``; then cross-object checks run
+(duplicate ids, overlapping Modbus ranges, MQTT topic collisions, broker references, ...).
+Problems are collected as :class:`Issue` objects instead of raising, so a single run reports
+everything. The hub must refuse to start when :attr:`ConfigReport.has_errors` is true.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from enum import StrEnum
+from itertools import combinations
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from hub.models import (
+    DEVICE_ADAPTER,
+    NUMERIC_TYPES,
+    PROTOCOLS,
+    Access,
+    AlarmsFile,
+    Broker,
+    BrokersFile,
+    ControlFile,
+    DataType,
+    ModbusDevice,
+    ModbusRtuDevice,
+    MqttDevice,
+    NotificationsFile,
+    OpcUaDevice,
+    SecurityPolicy,
+    TagBase,
+    UsernameAuth,
+    topics_overlap,
+)
+
+log = logging.getLogger(__name__)
+
+BROKERS_FILE = "brokers.yaml"
+DEVICES_DIR = "devices"
+ALARMS_FILE = "alarms.yaml"
+CONTROL_FILE = "control.yaml"
+NOTIFICATIONS_FILE = "notifications.yaml"
+
+AnyDevice = ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice
+
+
+class Severity(StrEnum):
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class Issue(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    severity: Severity
+    source: str  # config file, relative to the config directory, using '/'
+    message: str
+    location: str | None = None  # e.g. "tags[2] (motor_speed).address"
+
+
+@dataclass
+class LoadedDevice:
+    device: AnyDevice
+    source: str
+
+
+@dataclass
+class ConfigReport:
+    config_dir: Path
+    devices: list[LoadedDevice] = field(default_factory=list)
+    brokers: dict[str, Broker] = field(default_factory=dict)
+    alarms: AlarmsFile = field(default_factory=AlarmsFile)
+    control: ControlFile = field(default_factory=ControlFile)
+    notifications: NotificationsFile = field(default_factory=NotificationsFile)
+    issues: list[Issue] = field(default_factory=list)
+    # Every file that was read, mapped to its device_id (None if unknown or not a device file).
+    sources: dict[str, str | None] = field(default_factory=dict)
+
+    @property
+    def has_errors(self) -> bool:
+        return any(i.severity is Severity.ERROR for i in self.issues)
+
+    def tags_by_path(self) -> dict[str, tuple[AnyDevice, TagBase]]:
+        """Every tag of every valid device, keyed by its full tag path."""
+        out: dict[str, tuple[AnyDevice, TagBase]] = {}
+        for loaded in self.devices:
+            for tag in loaded.device.tags:
+                out[loaded.device.tag_path(tag.name)] = (loaded.device, tag)
+        return out
+
+    def issues_for(self, source: str) -> list[Issue]:
+        return [i for i in self.issues if i.source == source]
+
+    def add(
+        self, severity: Severity, source: str, message: str, location: str | None = None
+    ) -> None:
+        self.issues.append(
+            Issue(severity=severity, source=source, message=message, location=location)
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# YAML reading
+# --------------------------------------------------------------------------------------------
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate mapping keys (PyYAML silently keeps the last one)."""
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=True)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
+
+def _read_yaml(path: Path, source: str, report: ConfigReport) -> Any | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+        return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+    except (OSError, UnicodeDecodeError) as exc:
+        report.add(Severity.ERROR, source, f"cannot read file: {exc}")
+    except yaml.YAMLError as exc:
+        report.add(Severity.ERROR, source, f"invalid YAML: {exc}")
+    return None
+
+
+def _format_location(loc: tuple[int | str, ...], raw: Any) -> str | None:
+    """Turn a Pydantic error location into 'tags[2] (motor_speed).address'."""
+    parts: list[str] = []
+    node = raw
+    for i, item in enumerate(loc):
+        if i == 0 and item in PROTOCOLS:
+            continue  # discriminated-union branch name, not a real field
+        if isinstance(item, int):
+            label = f"[{item}]"
+            node = node[item] if isinstance(node, list) and item < len(node) else None
+            if isinstance(node, dict) and isinstance(node.get("name"), str):
+                label += f" ({node['name']})"
+            parts.append(label)
+        else:
+            if item in ("anonymous", "username") and parts and parts[-1] == ".auth":
+                continue  # auth union branch name
+            parts.append(f".{item}")
+            node = node.get(item) if isinstance(node, dict) else None
+    return "".join(parts).lstrip(".") or None
+
+
+def _add_validation_errors(
+    report: ConfigReport, source: str, exc: ValidationError, raw: Any
+) -> None:
+    for err in exc.errors(include_url=False):
+        msg = err["msg"].removeprefix("Value error, ")
+        report.add(Severity.ERROR, source, msg, _format_location(err["loc"], raw))
+
+
+# --------------------------------------------------------------------------------------------
+# Loading
+# --------------------------------------------------------------------------------------------
+
+
+def load_config(config_dir: Path | str, env: Mapping[str, str] | None = None) -> ConfigReport:
+    """Load and validate everything under ``config_dir``.
+
+    ``env`` is used to warn about referenced secret env vars that are not set; it defaults
+    to ``os.environ``.
+    """
+    config_dir = Path(config_dir)
+    report = ConfigReport(config_dir=config_dir)
+    env = os.environ if env is None else env
+
+    _load_brokers(report)
+    _load_devices(report)
+
+    _check_brokers(report, env)
+    _check_device_ids(report)
+    for loaded in report.devices:
+        _check_device(report, loaded, env)
+    _check_modbus_endpoints(report)
+    _check_serial_lines(report)
+    _check_mqtt_topics(report)
+
+    _load_optional(report, ALARMS_FILE, AlarmsFile, "alarms")
+    _load_optional(report, CONTROL_FILE, ControlFile, "control")
+    _load_optional(report, NOTIFICATIONS_FILE, NotificationsFile, "notifications")
+    _check_alarms(report)
+    _check_control(report)
+    _check_notifications(report, env)
+
+    log.debug("config loaded: %d devices, %d issues", len(report.devices), len(report.issues))
+    return report
+
+
+def _load_brokers(report: ConfigReport) -> None:
+    path = report.config_dir / BROKERS_FILE
+    if not path.exists():
+        return
+    report.sources[BROKERS_FILE] = None
+    raw = _read_yaml(path, BROKERS_FILE, report)
+    if raw is None and not report.issues_for(BROKERS_FILE):
+        raw = {}  # empty file
+    if raw is None:
+        return
+    try:
+        parsed = BrokersFile.model_validate(raw)
+    except ValidationError as exc:
+        _add_validation_errors(report, BROKERS_FILE, exc, raw)
+        return
+    for broker in parsed.brokers:
+        if broker.broker_id in report.brokers:
+            report.add(
+                Severity.ERROR, BROKERS_FILE, f"duplicate broker_id {broker.broker_id!r}"
+            )
+            continue
+        report.brokers[broker.broker_id] = broker
+
+
+def _load_devices(report: ConfigReport) -> None:
+    devices_dir = report.config_dir / DEVICES_DIR
+    if not devices_dir.is_dir():
+        report.add(Severity.WARNING, DEVICES_DIR, "no devices directory; no devices configured")
+        return
+    paths = sorted([*devices_dir.glob("*.yaml"), *devices_dir.glob("*.yml")])
+    for path in paths:
+        source = f"{DEVICES_DIR}/{path.name}"
+        report.sources[source] = None
+        raw = _read_yaml(path, source, report)
+        if report.issues_for(source):
+            continue
+        if not isinstance(raw, dict):
+            report.add(Severity.ERROR, source, "a device file must contain one YAML mapping")
+            continue
+        if isinstance(raw.get("device_id"), str):
+            report.sources[source] = raw["device_id"]
+        try:
+            device = DEVICE_ADAPTER.validate_python(raw)
+        except ValidationError as exc:
+            _add_validation_errors(report, source, exc, raw)
+            continue
+        report.devices.append(LoadedDevice(device=device, source=source))
+        if path.stem != device.device_id:
+            report.add(
+                Severity.WARNING,
+                source,
+                f"file name should match device_id: rename to {device.device_id}.yaml",
+            )
+
+
+# --------------------------------------------------------------------------------------------
+# Checks
+# --------------------------------------------------------------------------------------------
+
+
+def _warn_unset_env_vars(
+    report: ConfigReport,
+    source: str,
+    refs: Iterable[tuple[str, str | None]],
+    env: Mapping[str, str],
+) -> None:
+    """``refs`` are (location, env var name) pairs; a None name means 'not configured'."""
+    for location, name in refs:
+        if name and not env.get(name):
+            report.add(Severity.WARNING, source, f"env var {name} is not set", location)
+
+
+def _check_brokers(report: ConfigReport, env: Mapping[str, str]) -> None:
+    for broker in report.brokers.values():
+        where = f"brokers[{broker.broker_id}]"
+        if broker.username_env and not broker.tls:
+            report.add(
+                Severity.WARNING,
+                BROKERS_FILE,
+                "credentials are sent without TLS; set tls: true",
+                where,
+            )
+        _warn_unset_env_vars(
+            report,
+            BROKERS_FILE,
+            [(f"{where}.username_env", broker.username_env),
+             (f"{where}.password_env", broker.password_env)],
+            env,
+        )
+
+
+def _check_device_ids(report: ConfigReport) -> None:
+    by_id: dict[str, list[LoadedDevice]] = defaultdict(list)
+    for loaded in report.devices:
+        by_id[loaded.device.device_id].append(loaded)
+    for device_id, group in by_id.items():
+        for loaded in group:
+            others = ", ".join(o.source for o in group if o is not loaded)
+            if others:
+                report.add(
+                    Severity.ERROR,
+                    loaded.source,
+                    f"duplicate device_id {device_id!r} (also defined in {others})",
+                    "device_id",
+                )
+
+
+def _tag_loc(index: int, name: str, field_name: str | None = None) -> str:
+    loc = f"tags[{index}] ({name})"
+    return f"{loc}.{field_name}" if field_name else loc
+
+
+def _check_device(report: ConfigReport, loaded: LoadedDevice, env: Mapping[str, str]) -> None:
+    device, source = loaded.device, loaded.source
+
+    if not device.tags:
+        report.add(Severity.WARNING, source, "device has no tags", "tags")
+
+    seen: dict[str, int] = {}
+    for i, tag in enumerate(device.tags):
+        if tag.name in seen:
+            report.add(
+                Severity.ERROR,
+                source,
+                f"duplicate tag name {tag.name!r} (first used at tags[{seen[tag.name]}])",
+                _tag_loc(i, tag.name, "name"),
+            )
+        else:
+            seen[tag.name] = i
+
+    if isinstance(device, ModbusDevice | ModbusRtuDevice):
+        _check_modbus_device(report, device, source)
+    elif isinstance(device, MqttDevice):
+        _check_mqtt_device(report, device, source)
+    elif isinstance(device, OpcUaDevice):
+        _check_opcua_device(report, device, source, env)
+
+
+def _check_modbus_device(report: ConfigReport, device: ModbusDevice | ModbusRtuDevice,
+                         source: str) -> None:
+    limit = device.connection.max_registers_per_read
+    indexed = list(enumerate(device.tags))
+    for i, tag in indexed:
+        if tag.register_count > limit:
+            report.add(
+                Severity.ERROR,
+                source,
+                f"tag needs {tag.register_count} registers but "
+                f"connection.max_registers_per_read is {limit}",
+                _tag_loc(i, tag.name, "count"),
+            )
+    for (i, a), (j, b) in combinations(indexed, 2):
+        if a.register_type != b.register_type or not (
+            a.address <= b.last_address and b.address <= a.last_address
+        ):
+            continue
+        if a.bit is not None or b.bit is not None:
+            # Bit tags may share a register with other bits and with the whole-word tag
+            # (e.g. a raw status word next to its decoded flags); only the same bit twice is
+            # a mistake.
+            if a.bit == b.bit and a.address == b.address:
+                report.add(
+                    Severity.ERROR,
+                    source,
+                    f"bit {b.bit} of {b.register_type} {b.address} is already used by "
+                    f"tags[{i}] ({a.name})",
+                    _tag_loc(j, b.name, "bit"),
+                )
+            continue
+        report.add(
+            Severity.ERROR,
+            source,
+            f"{b.register_type} range {b.address}..{b.last_address} overlaps "
+            f"tags[{i}] ({a.name}) at {a.address}..{a.last_address}",
+            _tag_loc(j, b.name, "address"),
+        )
+
+
+def _check_mqtt_device(report: ConfigReport, device: MqttDevice, source: str) -> None:
+    if device.connection.broker_ref not in report.brokers:
+        known = ", ".join(sorted(report.brokers)) or "none defined"
+        report.add(
+            Severity.ERROR,
+            source,
+            f"unknown broker_ref {device.connection.broker_ref!r} "
+            f"(brokers in {BROKERS_FILE}: {known})",
+            "connection.broker_ref",
+        )
+    if device.connection.status_topic is None and device.connection.stale_after_s is None:
+        report.add(
+            Severity.WARNING,
+            source,
+            "no status_topic (LWT) and no stale_after_s: if the device dies silently its last "
+            "values stay 'good' forever; set stale_after_s",
+            "connection.stale_after_s",
+        )
+    _warn_duplicate_addresses(report, source, [(t.name, t.json_path) for t in device.tags],
+                              "json_path")
+
+
+def _check_opcua_device(
+    report: ConfigReport, device: OpcUaDevice, source: str, env: Mapping[str, str]
+) -> None:
+    conn = device.connection
+    env_refs = [
+        ("connection.client_certificate_env", conn.client_certificate_env),
+        ("connection.client_private_key_env", conn.client_private_key_env),
+    ]
+    if isinstance(conn.auth, UsernameAuth):
+        env_refs += [
+            ("connection.auth.username_env", conn.auth.username_env),
+            ("connection.auth.password_env", conn.auth.password_env),
+        ]
+        if conn.security_policy is SecurityPolicy.NONE:
+            report.add(
+                Severity.WARNING,
+                source,
+                "username/password is sent unencrypted with security_policy None",
+                "connection.security_policy",
+            )
+    _warn_unset_env_vars(report, source, env_refs, env)
+    _warn_duplicate_addresses(report, source, [(t.name, t.node_id) for t in device.tags],
+                              "node_id")
+
+
+def _warn_duplicate_addresses(
+    report: ConfigReport, source: str, pairs: list[tuple[str, str]], field_name: str
+) -> None:
+    first: dict[str, tuple[int, str]] = {}
+    for i, (name, address) in enumerate(pairs):
+        if address in first:
+            j, other = first[address]
+            report.add(
+                Severity.WARNING,
+                source,
+                f"same {field_name} as tags[{j}] ({other}); intentional?",
+                _tag_loc(i, name, field_name),
+            )
+        else:
+            first[address] = (i, name)
+
+
+def _collision_severity(a: AnyDevice, b: AnyDevice) -> tuple[Severity, str]:
+    """Collisions involving a disabled device are only warnings (e.g. a replaced device)."""
+    if a.enabled and b.enabled:
+        return Severity.ERROR, ""
+    return Severity.WARNING, " (a disabled device is involved)"
+
+
+def _check_modbus_endpoints(report: ConfigReport) -> None:
+    by_endpoint: dict[tuple[str, int, int], list[LoadedDevice]] = defaultdict(list)
+    for loaded in report.devices:
+        if isinstance(loaded.device, ModbusDevice):
+            c = loaded.device.connection
+            by_endpoint[(c.host.lower(), c.port, c.unit_id)].append(loaded)
+    for (host, port, unit_id), group in by_endpoint.items():
+        for a, b in combinations(group, 2):
+            severity, note = _collision_severity(a.device, b.device)
+            for this, other in ((a, b), (b, a)):
+                report.add(
+                    severity,
+                    this.source,
+                    f"{host}:{port} unit_id {unit_id} is also used by "
+                    f"{other.device.device_id!r} ({other.source}){note}",
+                    "connection.unit_id",
+                )
+
+
+def _check_serial_lines(report: ConfigReport) -> None:
+    """RTU devices on one serial port: unique unit ids, identical line settings."""
+    by_port: dict[str, list[LoadedDevice]] = defaultdict(list)
+    for loaded in report.devices:
+        if isinstance(loaded.device, ModbusRtuDevice):
+            by_port[loaded.device.connection.port.lower()].append(loaded)
+    for port, group in by_port.items():
+        settings = {g.device.connection.line_settings() for g in group}  # type: ignore[union-attr]
+        if len(settings) > 1:
+            for g in group:
+                c = g.device.connection  # type: ignore[union-attr]
+                report.add(Severity.ERROR, g.source,
+                           f"serial port {port} is shared with other devices using different "
+                           f"line settings (here {c.baudrate} {c.bytesize}{c.parity}{c.stopbits})",
+                           "connection.baudrate")
+        for a, b in combinations(group, 2):
+            if a.device.connection.unit_id != b.device.connection.unit_id:  # type: ignore[union-attr]
+                continue
+            severity, note = _collision_severity(a.device, b.device)
+            for this, other in ((a, b), (b, a)):
+                report.add(severity, this.source,
+                           f"{port} unit_id {this.device.connection.unit_id} is also used by "  # type: ignore[union-attr]
+                           f"{other.device.device_id!r} ({other.source}){note}",
+                           "connection.unit_id")
+
+
+def _check_mqtt_topics(report: ConfigReport) -> None:
+    entries: list[tuple[LoadedDevice, str, str]] = []  # (device, role, topic)
+    for loaded in report.devices:
+        if isinstance(loaded.device, MqttDevice):
+            c = loaded.device.connection
+            for role in ("telemetry_topic", "command_topic", "status_topic"):
+                topic = getattr(c, role)
+                if topic is not None:
+                    entries.append((loaded, role, topic))
+
+    for (la, role_a, ta), (lb, role_b, tb) in combinations(entries, 2):
+        ca, cb = la.device.connection, lb.device.connection
+        if ca.broker_ref != cb.broker_ref or not topics_overlap(ta, tb):
+            continue
+        if la is lb:
+            report.add(
+                Severity.ERROR,
+                la.source,
+                f"{role_a} {ta!r} overlaps {role_b} {tb!r} of the same device",
+                f"connection.{role_b}",
+            )
+            continue
+        severity, note = _collision_severity(la.device, lb.device)
+        for (this, role, topic), (other, other_role, other_topic) in (
+            ((la, role_a, ta), (lb, role_b, tb)),
+            ((lb, role_b, tb), (la, role_a, ta)),
+        ):
+            report.add(
+                severity,
+                this.source,
+                f"{role} {topic!r} collides with {other_role} {other_topic!r} of "
+                f"{other.device.device_id!r} ({other.source}) on broker "
+                f"{ca.broker_ref!r}{note}",
+                f"connection.{role}",
+            )
+
+
+# --------------------------------------------------------------------------------------------
+# Alarms and control policy
+# --------------------------------------------------------------------------------------------
+
+
+def _load_optional(report: ConfigReport, name: str, model: type[BaseModel], attr: str) -> None:
+    path = report.config_dir / name
+    if not path.exists():
+        return
+    report.sources[name] = None
+    raw = _read_yaml(path, name, report)
+    if report.issues_for(name):
+        return
+    try:
+        setattr(report, attr, model.model_validate(raw or {}))
+    except ValidationError as exc:
+        _add_validation_errors(report, name, exc, raw)
+
+
+def _is_numeric(tag: TagBase) -> bool:
+    return tag.data_type in NUMERIC_TYPES
+
+
+def _check_alarms(report: ConfigReport) -> None:
+    tags = report.tags_by_path()
+    seen: set[str] = set()
+    for i, rule in enumerate(report.alarms.rules):
+        where = f"rules[{i}] ({rule.tag})"
+        if rule.tag in seen:
+            report.add(Severity.ERROR, ALARMS_FILE, "a tag can have only one alarm rule", where)
+        seen.add(rule.tag)
+        found = tags.get(rule.tag)
+        if found is None:
+            report.add(Severity.ERROR, ALARMS_FILE, f"unknown tag {rule.tag}", where)
+            continue
+        tag = found[1]
+        if rule.equals is not None and tag.data_type is not DataType.BOOL:
+            report.add(Severity.ERROR, ALARMS_FILE,
+                       f"equals is for bool tags; {rule.tag} is {tag.data_type}", where)
+        if rule.equals is None and not _is_numeric(tag):
+            report.add(Severity.ERROR, ALARMS_FILE,
+                       f"hi/lo limits need a numeric tag; {rule.tag} is {tag.data_type}", where)
+
+
+def _check_control(report: ConfigReport) -> None:
+    tags = report.tags_by_path()
+    policies = [("defaults", None, report.control.defaults)]
+    policies += [(f"tags[{p}]", p, pol) for p, pol in report.control.tags.items()]
+    for where, path, policy in policies:
+        if path is not None:
+            found = tags.get(path)
+            if found is None:
+                report.add(Severity.ERROR, CONTROL_FILE, f"unknown tag {path}", where)
+            elif found[1].access is not Access.READ_WRITE:
+                report.add(Severity.ERROR, CONTROL_FILE,
+                           f"{path} is not read_write; a control policy has no effect", where)
+            elif policy.max_step is not None and not _is_numeric(found[1]):
+                report.add(Severity.ERROR, CONTROL_FILE, "max_step only applies to numeric tags",
+                           where)
+        for j, lock in enumerate(policy.interlocks):
+            loc = f"{where}.interlocks[{j}]"
+            target = tags.get(lock.tag)
+            if target is None:
+                report.add(Severity.ERROR, CONTROL_FILE, f"unknown interlock tag {lock.tag}", loc)
+                continue
+            ttag = target[1]
+            if ttag.data_type is DataType.BOOL and not isinstance(lock.value, bool):
+                report.add(Severity.ERROR, CONTROL_FILE, f"{lock.tag} is bool; value must be "
+                           "true or false", loc)
+            elif _is_numeric(ttag) and isinstance(lock.value, bool | str):
+                report.add(Severity.ERROR, CONTROL_FILE, f"{lock.tag} is numeric; value must be "
+                           "a number", loc)
+            elif lock.op in ("lt", "le", "gt", "ge") and not _is_numeric(ttag):
+                report.add(Severity.ERROR, CONTROL_FILE, f"{lock.op} needs a numeric tag", loc)
+
+
+def _check_notifications(report: ConfigReport, env: Mapping[str, str]) -> None:
+    n = report.notifications
+    for i, rule in enumerate(n.rules):
+        for name in rule.channels:
+            if name not in n.channels:
+                report.add(Severity.ERROR, NOTIFICATIONS_FILE, f"unknown channel {name!r}",
+                           f"rules[{i}] ({rule.name}).channels")
+    names = [r.name for r in n.rules]
+    for name in {x for x in names if names.count(x) > 1}:
+        report.add(Severity.ERROR, NOTIFICATIONS_FILE, f"duplicate rule name {name!r}", "rules")
+    for name, channel in n.channels.items():
+        refs = [(f"channels[{name}].{attr}", getattr(channel, attr, None))
+                for attr in ("username_env", "password_env", "bot_token_env", "api_key_env",
+                             "secret_env")]
+        _warn_unset_env_vars(report, NOTIFICATIONS_FILE, refs, env)

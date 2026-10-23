@@ -1,0 +1,54 @@
+# Three-phase power meter, Modbus TCP.
+device_id: meter_01
+name: Main incomer power meter
+site: kish
+area: substation
+protocol: modbus_tcp
+enabled: true
+description: Energy meter on the main 400 V incomer.
+poll_interval_ms: 1000
+connection:
+  host: 192.168.10.21
+  port: 502
+  unit_id: 1
+  timeout_ms: 1000
+  retries: 3
+  byte_order: big
+  word_order: big
+  max_registers_per_read: 100
+tags:
+  - name: voltage_l1
+    unit: V
+    data_type: float32
+    register_type: input
+    address: 0
+  - name: current_l1
+    unit: A
+    data_type: float32
+    register_type: input
+    address: 2
+  - name: active_power
+    unit: kW
+    data_type: float32
+    register_type: input
+    address: 4
+  - name: energy_total
+    unit: kWh
+    data_type: uint32
+    register_type: input
+    address: 10
+    scale: 0.01
+  - name: breaker_closed
+    data_type: bool
+    register_type: discrete_input
+    address: 0
+  # The only writable tag: bounded, and still subject to RBAC in the control-safety layer.
+  - name: demand_limit
+    unit: kW
+    description: Demand alarm threshold.
+    data_type: uint16
+    register_type: holding
+    address: 100
+    access: read_write
+    min: 0
+    max: 500

@@ -1,0 +1,10 @@
+# MQTT brokers referenced by devices via connection.broker_ref.
+# Credentials are env var NAMES; the values live in the environment / .env (never here).
+brokers:
+  - broker_id: plant_broker
+    host: mqtt.kish.local
+    port: 8883
+    tls: true
+    keepalive_s: 60
+    username_env: HUB_MQTT_PLANT_USERNAME
+    password_env: HUB_MQTT_PLANT_PASSWORD

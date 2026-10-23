@@ -1,0 +1,35 @@
+# Pump station PLC, OPC UA.
+device_id: plc_01
+name: Pump station PLC
+site: kish
+area: pump_station
+protocol: opcua
+enabled: true
+poll_interval_ms: 500
+connection:
+  endpoint_url: opc.tcp://192.168.10.50:4840
+  security_policy: Basic256Sha256
+  security_mode: SignAndEncrypt
+  client_certificate_env: HUB_OPCUA_CLIENT_CERT_PATH
+  client_private_key_env: HUB_OPCUA_CLIENT_KEY_PATH
+  auth:
+    type: username
+    username_env: HUB_OPCUA_PLC01_USERNAME
+    password_env: HUB_OPCUA_PLC01_PASSWORD
+  namespace: urn:kish:pump_station:plc_01
+tags:
+  - name: motor_speed
+    unit: rpm
+    data_type: float32
+    node_id: ns=2;s=Pump1.MotorSpeed
+  - name: motor_running
+    data_type: bool
+    node_id: ns=2;s=Pump1.Running
+  - name: discharge_pressure
+    unit: bar
+    data_type: float32
+    node_id: ns=2;s=Pump1.DischargePressure
+  - name: run_hours
+    unit: h
+    data_type: uint32
+    node_id: ns=2;s=Pump1.RunHours

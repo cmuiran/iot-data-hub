@@ -1,0 +1,59 @@
+[project]
+name = "iot-data-hub"
+version = "0.3.0"
+description = "Industrial IoT Data Hub"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7,<3",        # config and data models
+    "PyYAML>=6.0",             # YAML config files
+    "pymodbus>=3.7,<4",        # Modbus TCP driver (client only)
+    "aiomqtt>=2.3,<3",         # MQTT driver
+    "asyncua>=1.1",            # OPC UA driver (and the OPC UA simulator)
+    "fastapi>=0.115",          # backend API
+    "uvicorn>=0.30",           # ASGI server for the backend
+    "websockets>=12",          # WebSocket transport for uvicorn (live data)
+    "psycopg[binary]>=3.2",    # PostgreSQL store
+    "psycopg-pool>=3.2",       # connection pool for the PostgreSQL store
+    "argon2-cffi>=23",         # password hashing
+    "PyJWT>=2.9",              # access tokens
+    "openpyxl>=3.1",           # Excel report export (also used by the add-device importer)
+    "tzdata>=2024.1",          # time zones on Windows (reports, backups, schedules)
+    "pyserial>=3.5",           # Modbus RTU on serial ports / RFC 2217 serial servers
+    "httpx>=0.27",             # notifications: Telegram, SMS gateways, webhooks
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",    # async tests (drivers, simulators, API)
+    "amqtt>=0.11",             # in-process MQTT broker for tests and the local simulator
+    "pgserver>=0.1.4",         # throw-away PostgreSQL for the store tests (no install needed)
+    "aiosmtpd>=1.4",           # local SMTP server for the e-mail notification tests
+]
+
+[project.scripts]
+hub = "hub.main:main"
+hub-api = "backend.server:main"
+hub-sim = "simulators.run:main"
+hub-admin = "backend.admin:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hub*", "backend*", "simulators*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: talks to a simulator over a real socket (still no hardware)",
+    "postgres: needs PostgreSQL (pgserver or HUB_TEST_DATABASE_URL)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:amqtt.*",
+    "ignore::DeprecationWarning:asyncua.*",
+]

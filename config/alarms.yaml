@@ -1,0 +1,23 @@
+# Limit alarms (schema: AlarmsFile in hub/models.py). Values are engineering units.
+# An alarm is raised when the condition holds for delay_s and cleared when the value is back
+# inside the limit by more than deadband. Device offline alarms are automatic.
+offline_alarm: true
+offline_severity: high
+offline_delay_s: 30
+rules:
+  - tag: kish.warehouse.env_sensor_01.temperature
+    hi: 35
+    hihi: 45
+    deadband: 1
+    delay_s: 60
+    severity: medium
+    message: Warehouse temperature high
+  - tag: kish.pump_station.plc_01.discharge_pressure
+    lo: 1.5
+    hi: 9.0
+    deadband: 0.2
+    severity: high
+  - tag: kish.substation.meter_01.breaker_closed
+    equals: false
+    severity: critical
+    message: Main incomer breaker open

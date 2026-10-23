@@ -1,0 +1,54 @@
+# Alarm notifications (schema: NotificationsFile in hub/models.py).
+# Copy to config/notifications.yaml and adapt. Secrets are environment variable NAMES (.env).
+# Test a channel after starting the hub:  POST /api/notifications/test/<channel>
+language: fa              # fa | en
+max_per_minute: 20        # per channel; more is logged as "throttled"
+
+channels:
+  ops_mail:
+    type: email
+    host: smtp.kish.local
+    port: 587
+    security: starttls    # starttls | ssl | none
+    username_env: HUB_SMTP_USERNAME
+    password_env: HUB_SMTP_PASSWORD
+    sender: hub@kish.local
+    recipients: [operators@kish.local]
+
+  ops_telegram:
+    type: telegram
+    bot_token_env: HUB_TELEGRAM_BOT_TOKEN
+    chat_ids: ["-1001234567890"]
+
+  # Generic HTTP SMS gateway. {message}, {recipient}, {api_key} are filled in.
+  # Example in the style of a REST SMS API (adapt to your provider's documentation):
+  ops_sms:
+    type: sms
+    url: https://api.sms-provider.example/v1/{api_key}/sms/send.json
+    method: POST
+    params:
+      receptor: "{recipient}"
+      message: "{message}"
+    api_key_env: HUB_SMS_API_KEY
+    recipients: ["09120000000"]
+
+  scada_hook:
+    type: webhook
+    url: https://scada.kish.local/hooks/hub-alarms
+    secret_env: HUB_WEBHOOK_SECRET   # adds X-Hub-Signature-256: sha256=<hmac>
+
+rules:
+  - name: critical_everywhere
+    channels: [ops_mail, ops_telegram, ops_sms]
+    min_severity: critical
+    events: [raised, cleared]
+  - name: high_gate
+    channels: [ops_telegram]
+    min_severity: high
+    sites: [kish]
+    areas: [gate]
+    include_offline: true
+  - name: everything_to_scada
+    channels: [scada_hook]
+    min_severity: low
+    events: [raised, cleared]

@@ -1,0 +1,17 @@
+# Control-safety policy (schema: ControlFile in hub/models.py).
+# Writes are also off globally unless HUB_CONTROL_ENABLED=true, need a role with tag.write
+# for the tag's site/area, and only work on tags with access: read_write.
+defaults:
+  confirm: false          # true = a second user with write.confirm must approve
+  min_interval_s: 2       # minimum time between two writes to the same tag
+  readback_timeout_s: 5
+tags:
+  kish.substation.meter_01.demand_limit:
+    confirm: true
+    max_step: 100         # kW per write
+    interlocks:
+      - tag: kish.substation.meter_01.breaker_closed
+        op: eq
+        value: true
+        max_age_s: 10
+        message: Main incomer breaker must be closed

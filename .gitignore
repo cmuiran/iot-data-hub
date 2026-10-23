@@ -1,0 +1,69 @@
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Local config overrides (commit *.example.yaml only)
+config/*.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/build/
+
+# Data / logs
+*.log
+logs/
+*.sqlite3
+data/db/
+
+# PlatformIO / embedded build output
+.pio/
+*.bin
+*.elf
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local simulation / development databases
+.sim/
+.dev/
+
+# Runtime data that must never be committed
+pki/
+logs/
+backups/
+config/.trash/
+scripts/windows/hub-api-service.exe
+scripts/windows/hub-api-service.xml

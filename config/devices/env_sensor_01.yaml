@@ -1,0 +1,34 @@
+# Temperature / humidity sensor publishing JSON over MQTT, e.g.
+#   {"data": {"temp": 23.4, "hum": 41.0}, "battery": 87, "door": false}
+device_id: env_sensor_01
+name: Warehouse environment sensor
+site: kish
+area: warehouse
+protocol: mqtt
+enabled: true
+connection:
+  broker_ref: plant_broker
+  telemetry_topic: kish/warehouse/env_sensor_01/telemetry
+  status_topic: kish/warehouse/env_sensor_01/status
+  payload_format: json
+  qos: 1
+tags:
+  - name: temperature
+    unit: degC
+    data_type: float32
+    json_path: $.data.temp
+    min: -20
+    max: 60
+  - name: humidity
+    unit: "%"
+    data_type: float32
+    json_path: $.data.hum
+    min: 0
+    max: 100
+  - name: battery_level
+    unit: "%"
+    data_type: uint16
+    json_path: $.battery
+  - name: door_open
+    data_type: bool
+    json_path: $.door
