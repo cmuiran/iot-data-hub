@@ -22,7 +22,16 @@ from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
 from pymodbus.pdu import ExceptionResponse
 
-from hub.codec import Value, decode_bit, decode_registers, encode_registers
+from hub.codec import (
+    CodecError,
+    Value,
+    decode_bcd,
+    decode_bit,
+    decode_bit_field,
+    decode_registers,
+    encode_bcd,
+    encode_registers,
+)
 from hub.drivers.base import (
     DeviceState,
     Driver,
@@ -222,16 +231,27 @@ class ModbusTcpDriver(Driver[ModbusDevice]):
                 raise ModbusDeviceException(ILLEGAL_DATA_ADDRESS, f"every tag of {block.start}")
             return out
         data = await self._read_area(block.register_type, block.start, block.count)
-        return {t.name: self._extract(t, data, block.start) for t in block.tags}
+        out = {}
+        for tag in block.tags:
+            try:
+                out[tag.name] = self._extract(tag, data, block.start)
+            except CodecError as exc:   # e.g. a register that is not BCD: this tag only
+                log.warning("%s: %s: %s", self.device.device_id, tag.name, exc)
+                out[tag.name] = None
+        return out
 
     def _extract(self, tag: ModbusTag, data: list[int], start: int) -> Value:
         offset = tag.address - start
         if tag.register_type in (RegisterType.COIL, RegisterType.DISCRETE_INPUT):
             return bool(data[offset])
         if tag.bit is not None:
+            if tag.bit_count is not None:
+                return decode_bit_field(data[offset], tag.bit, tag.bit_count)
             return decode_bit(data[offset], tag.bit)
         c = self.device.connection
         regs = data[offset : offset + tag.register_count]
+        if tag.encoding == "bcd":
+            return decode_bcd(regs, c.word_order)
         return decode_registers(regs, tag.data_type, c.byte_order, c.word_order)
 
     async def _read_area(self, rtype: RegisterType, address: int, count: int) -> list[int]:
@@ -275,8 +295,10 @@ class ModbusTcpDriver(Driver[ModbusDevice]):
                     response = await client.write_coil(tag.address, bool(raw), device_id=self._unit)
                 elif tag.register_type is RegisterType.HOLDING and tag.bit is None:
                     c = self.device.connection
-                    regs = encode_registers(raw, tag.data_type, c.byte_order, c.word_order,
-                                            count=tag.count)
+                    regs = (encode_bcd(raw, tag.register_count, c.word_order)
+                            if tag.encoding == "bcd" else
+                            encode_registers(raw, tag.data_type, c.byte_order, c.word_order,
+                                             count=tag.count))
                     if len(regs) == 1:
                         response = await client.write_register(tag.address, regs[0],
                                                                device_id=self._unit)

@@ -18,9 +18,10 @@ pytestmark = pytest.mark.integration
 REPO_CONFIG = Path(__file__).resolve().parents[2] / "config"
 
 
-async def test_repo_config_runs_against_simulators(tmp_path: Path) -> None:
+async def test_repo_config_runs_against_simulators(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
     task = asyncio.create_task(sim_run._main(REPO_CONFIG, tmp_path, free_port(), free_port(),
-                                             free_port()))
+                                             free_port(), free_port(), free_port(), free_port()))
     try:
         sim_config = tmp_path / "config"
         for _ in range(200):
@@ -32,6 +33,11 @@ async def test_repo_config_runs_against_simulators(tmp_path: Path) -> None:
 
         report = load_config(sim_config, env={})
         assert not report.has_errors, report.issues
+        # what hub-api --env-file .sim/sim.env would load (the SNMP community)
+        for line in (tmp_path / "sim.env").read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                monkeypatch.setenv(key, value)
         original = load_config(REPO_CONFIG, env={})
         assert {d.device.device_id for d in report.devices} == {
             d.device.device_id for d in original.devices}
@@ -76,7 +82,8 @@ async def test_rtu_devices_are_simulated(tmp_path: Path) -> None:
             "tags": [{"name": "voltage", "data_type": "float32", "register_type": "input",
                       "address": 0}]}), encoding="utf-8")
     out = tmp_path / "out"
-    task = asyncio.create_task(sim_run._main(config, out, free_port(), free_port(), free_port()))
+    task = asyncio.create_task(sim_run._main(config, out, free_port(), free_port(), free_port(),
+                                             free_port(), free_port(), free_port()))
     try:
         for _ in range(200):
             if (out / "config" / "brokers.yaml").exists():

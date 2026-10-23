@@ -31,6 +31,7 @@ class TagOut(BaseModel):
     access: str
     min: float | None
     max: float | None
+    states: dict[int, str] | None = None   # labels of the values of an integer/bool tag
     value: Any = None
     ts: datetime | None = None
     quality: str | None = None
@@ -73,7 +74,7 @@ def _tag_out(svc: ServicesDep, path: str) -> TagOut:
     sample = svc.hub.latest.get(path)
     return TagOut(tag=path, name=tag.name, description=tag.description,
                   data_type=str(tag.data_type), unit=tag.unit, access=str(tag.access),
-                  min=tag.min, max=tag.max,
+                  min=tag.min, max=tag.max, states=tag.states,
                   value=sample.value if sample else None, ts=sample.timestamp if sample else None,
                   quality=str(sample.quality) if sample else None)
 

@@ -1,0 +1,36 @@
+# Copy to modbus_server.yaml to give SCADA / HMI / PLCs without OPC UA the hub's values over
+# Modbus TCP. Read-only unless the writes section is present.
+host: 0.0.0.0                 # 127.0.0.1 = this computer only
+port: 502
+unit_id: 1                    # clients may also use 0 or 255
+byte_order: big
+word_order: big
+allowed_clients:              # Modbus has no passwords: list the machines that may connect
+  - 192.168.10.5
+points:
+  - tag: kish.substation.meter_01.active_power
+    register_type: input
+    address: 0                # 2 registers (float32)
+    data_type: float32
+  - tag: kish.substation.meter_01.active_power
+    register_type: input
+    address: 2
+    source: quality           # 0 good, 1 uncertain, 2 bad
+  - tag: kish.substation.meter_01.energy_total
+    register_type: input
+    address: 10
+    data_type: uint32
+  - tag: kish.substation.meter_01.breaker_closed
+    register_type: discrete_input
+    address: 0
+  - tag: kish.substation.meter_01.demand_limit
+    register_type: holding
+    address: 100
+    data_type: uint16
+    writable: true
+# Writes go through the control-safety layer as this hub user (give it the operator role for
+# the area, nothing more), and only from these addresses.
+writes:
+  as_user: scada_link
+  allowed_clients:
+    - 192.168.10.5

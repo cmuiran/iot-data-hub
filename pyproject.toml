@@ -1,6 +1,6 @@
 [project]
 name = "iot-data-hub"
-version = "0.3.0"
+version = "0.4.0"
 description = "Industrial IoT Data Hub"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,7 +19,9 @@ dependencies = [
     "openpyxl>=3.1",           # Excel report export (also used by the add-device importer)
     "tzdata>=2024.1",          # time zones on Windows (reports, backups, schedules)
     "pyserial>=3.5",           # Modbus RTU on serial ports / RFC 2217 serial servers
-    "httpx>=0.27",             # notifications: Telegram, SMS gateways, webhooks
+    "httpx>=0.27",             # notifications, and the HTTP/REST driver
+    "python-snap7>=3.3,<4",    # Siemens S7 driver (pure Python, asyncio client; its server = the S7 simulator)
+    "pysnmp>=7.1,<8",          # SNMP driver (v2c/v3, asyncio; its agent engine = the SNMP simulator)
 ]
 
 [project.optional-dependencies]

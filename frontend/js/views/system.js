@@ -16,7 +16,7 @@ async function section(box, title, load) {
 
 export async function render(page, { setTitle }) {
   setTitle(t('system.title'));
-  const boxes = Object.fromEntries(['hub', 'nodes', 'certs', 'backup', 'notify', 'events', 'config'].map((k) => [k, h('div')]));
+  const boxes = Object.fromEntries(['hub', 'nodes', 'certs', 'backup', 'notify', 'events', 'config', 'outputs'].map((k) => [k, h('div')]));
 
   const loadHub = () => section(boxes.hub, t('system.hub'), async () => {
     const [st, health] = await Promise.all([api('api/system/stats'), api('api/health').catch((e) => e.body)]);
@@ -103,6 +103,31 @@ export async function render(page, { setTitle }) {
     ], events, { emptyText: t('system.no_events') });
   });
 
+  const loadOutputs = () => section(boxes.outputs, t('system.outputs'), async () => {
+    const out = await api('api/system/outputs');
+    const ms = out.modbus_server;
+    return [
+      h('h3', null, t('system.northbound')),
+      table([
+        { label: t('system.target'), render: (r) => h('div', null, h('div', { class: 'mono' }, r.name), h('div', { class: 'tagpath' }, `${r.broker} · ${r.topic_prefix}/…`)) },
+        { label: t('system.state'), render: (r) => (r.connected ? badge(t('system.connected'), 'online', true) : badge(t('system.disconnected'), 'error', true)) },
+        { label: t('system.published'), cls: 'value', render: (r) => fmtInteger(r.published) },
+        { label: t('system.queued'), cls: 'value', render: (r) => fmtInteger(r.queued) },
+        { label: t('system.dropped'), cls: 'value', render: (r) => fmtInteger(r.dropped) },
+        { label: t('system.detail'), render: (r) => h('span', { class: 'tiny mono' }, r.last_error || '') },
+      ], out.northbound, { emptyText: t('system.no_northbound') }),
+      h('h3', null, t('system.modbus_server')),
+      ms && ms.enabled
+        ? h('dl', { class: 'kv' },
+          h('dt', null, t('system.address')), h('dd', { class: 'mono' }, `${ms.host}:${ms.port}`),
+          h('dt', null, t('system.points')), h('dd', null, fmtInteger(ms.points)),
+          h('dt', null, t('system.writes')), h('dd', null, ms.writes ? t('system.writes_on') : t('system.writes_off')),
+          h('dt', null, t('system.clients')), h('dd', null, fmtInteger(ms.clients)),
+          h('dt', null, t('system.requests')), h('dd', { class: 'mono small' }, Object.entries(ms.counters).map(([k, v]) => `${k}=${v}`).join('  ') || '—'))
+        : empty(t('system.no_modbus_server')),
+    ];
+  });
+
   const loadConfig = () => section(boxes.config, t('system.config_issues'), async () => {
     const cfg = await api('api/system/config');
     if (!cfg.issues.length) return notice(t('system.config_clean'), 'ok');
@@ -113,8 +138,8 @@ export async function render(page, { setTitle }) {
     h('div', { class: 'page-head' }, h('div', null, h('h1', null, t('system.title')), h('div', { class: 'sub' }, t('system.subtitle'))),
       button(t('common.refresh'), () => all(), { iconName: 'refresh' })),
     h('div', { class: 'grid wide' }, boxes.hub, boxes.nodes, boxes.config, boxes.certs),
-    boxes.backup, boxes.notify, boxes.events);
-  const all = () => { loadHub(); loadNodes(); loadCerts(); loadBackup(); loadNotify(); loadEvents(); loadConfig(); };
+    boxes.outputs, boxes.backup, boxes.notify, boxes.events);
+  const all = () => { loadHub(); loadNodes(); loadCerts(); loadOutputs(); loadBackup(); loadNotify(); loadEvents(); loadConfig(); };
   all();
   return null;
 }

@@ -137,10 +137,32 @@ class TagBase(_Strict):
         default=None, ge=0,
         description="store only when the value moved by more than this (engineering units)",
     )
+    states: dict[int, Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
+        default=None, max_length=64,
+        description="labels for the values of an integer or bool tag, e.g. {0: stopped, 1: running}",
+    )
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def _states_are_text(cls, value: object) -> object:
+        if isinstance(value, dict):
+            for key, label in value.items():
+                if isinstance(label, bool):
+                    raise ValueError(f"label of {key} was read as {label}: quote words like "
+                                     "on, off, yes, no in YAML (e.g. 0: \"off\")")
+        return value
 
     @model_validator(mode="after")
     def _check_value_semantics(self) -> TagBase:
         numeric = self.data_type in NUMERIC_TYPES
+        if self.states is not None:
+            if self.data_type is DataType.BOOL:
+                if not set(self.states) <= {0, 1}:
+                    raise ValueError("states of a bool tag use the keys 0 (false) and 1 (true)")
+            elif self.data_type not in INTEGER_RANGES:
+                raise ValueError("states (value labels) apply to integer and bool tags only")
+            elif self.scale != 1.0 or self.offset != 0.0:
+                raise ValueError("states label raw integer values; do not combine with scale/offset")
         if not numeric and self.history_deadband is not None:
             raise ValueError("history_deadband only applies to numeric tags")
         if not numeric:
@@ -203,6 +225,9 @@ MODBUS_WIDTH: dict[DataType, int] = {
 }
 
 
+BCD_MAX: dict[DataType, int] = {DataType.UINT16: 9999, DataType.UINT32: 99_999_999}
+
+
 class ModbusTag(TagBase):
     """A Modbus point.
 
@@ -210,6 +235,12 @@ class ModbusTag(TagBase):
     for status words such as "bit 3 = fault". Such tags are bool and read-only: writing one
     bit needs a read-modify-write of the whole register, which the safety layer does not
     support yet.
+
+    ``bit`` + ``bit_count`` select a field of several bits (e.g. bits 4..6 = operating mode)
+    as an unsigned integer (data_type uint16, read-only); combine with ``states`` for labels.
+
+    ``encoding: bcd`` reads packed decimal digits (one per nibble), used by older meters and
+    drives: uint16 holds 0..9999, uint32 (two registers) 0..99999999.
     """
 
     register_type: RegisterType
@@ -226,6 +257,11 @@ class ModbusTag(TagBase):
         le=125,
         description="Registers to read. Derived from data_type; required only for string.",
     )
+    bit_count: int | None = Field(
+        default=None, ge=2, le=16,
+        description="with bit: width of a multi-bit field starting at bit (uint16, read-only)",
+    )
+    encoding: Literal["binary", "bcd"] = "binary"
 
     @property
     def register_count(self) -> int:
@@ -240,20 +276,41 @@ class ModbusTag(TagBase):
         bit_area = self.register_type in BIT_REGISTER_TYPES
         if bit_area and self.data_type is not DataType.BOOL:
             raise ValueError(f"{self.register_type} tags must have data_type bool")
-        if self.bit is not None:
+        if self.bit_count is not None:
+            if self.bit is None:
+                raise ValueError("bit_count needs bit (the lowest bit of the field)")
+            if self.bit + self.bit_count > 16:
+                raise ValueError(f"bits {self.bit}..{self.bit + self.bit_count - 1} exceed the "
+                                 "16-bit register")
+            if self.data_type is not DataType.UINT16:
+                raise ValueError("a multi-bit field (bit_count) has data_type uint16")
+            if self.access is Access.READ_WRITE:
+                raise ValueError("writing part of a register is not supported; use access: read")
+        if self.encoding == "bcd":
+            if self.data_type not in BCD_MAX:
+                raise ValueError("encoding bcd applies to uint16 (4 digits) and uint32 (8 digits)")
+            if bit_area or self.bit is not None:
+                raise ValueError("encoding bcd applies to whole holding/input registers")
+            limit = BCD_MAX[self.data_type]
+            for label, value in (("min", self.min), ("max", self.max)):
+                if value is not None and not 0 <= (value - self.offset) / self.scale <= limit:
+                    raise ValueError(f"{label}={value:g} does not fit {self.data_type} BCD "
+                                     f"(raw 0..{limit})")
+        if self.bit is not None and self.bit_count is None:
             if bit_area:
                 raise ValueError(
                     f"bit only applies to holding/input registers; a {self.register_type} "
                     "is already a single bit"
                 )
             if self.data_type is not DataType.BOOL:
-                raise ValueError("a tag with bit must have data_type bool")
+                raise ValueError("a tag with bit must have data_type bool (use bit_count for a "
+                                 "multi-bit field)")
             if self.access is Access.READ_WRITE:
                 raise ValueError(
                     "writing a single register bit is not supported (needs read-modify-write); "
                     "use access: read, or a coil / whole holding register for control"
                 )
-        elif not bit_area and self.data_type is DataType.BOOL:
+        elif self.bit is None and not bit_area and self.data_type is DataType.BOOL:
             raise ValueError(
                 "bool tags must use register_type coil or discrete_input, "
                 "or set bit (0-15) to read one bit of a holding/input register"
@@ -369,6 +426,173 @@ class OpcUaTag(TagBase):
                 "(expected [ns=<n>;|nsu=<uri>;] followed by i=, s=, g= or b=)"
             )
         return value
+
+
+# --- Siemens S7 (S7comm) -------------------------------------------------------------------
+
+
+class S7Area(StrEnum):
+    DB = "DB"
+    MERKER = "M"
+    INPUT = "I"
+    OUTPUT = "Q"
+
+
+# DB1.DBX6.2  DB1.DBB6  DB1.DBW6  DB1.DBD6 | M10.0 MB10 MW10 MD10 | I0.1 IW64 | Q0.0 QD4
+# German mnemonics E (Eingang) = I and A (Ausgang) = Q are accepted too.
+_S7_ADDRESS_RE = re.compile(
+    r"DB(?P<db>\d{1,5})\.DB(?P<dsize>[XBWD])(?P<dbyte>\d{1,5})(?:\.(?P<dbit>[0-7]))?"
+    r"|(?P<area>[MIEQA])(?P<size>[BWD]?)(?P<byte>\d{1,5})(?:\.(?P<bit>[0-7]))?"
+)
+S7_SIZE_BYTES = {"X": 1, "B": 1, "W": 2, "D": 4}
+
+
+class S7Address(BaseModel):
+    """A parsed S7 address. ``size`` X = bit, B = byte, W = word (2), D = double word (4)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    area: S7Area
+    db: int = 0
+    byte: int
+    bit: int | None = None
+    size: Literal["X", "B", "W", "D"]
+
+
+def parse_s7_address(text: str) -> S7Address:
+    m = _S7_ADDRESS_RE.fullmatch(text.strip().upper())
+    if m is None:
+        raise ValueError(
+            f"{text!r} is not an S7 address; examples: DB1.DBD0, DB1.DBW4, DB1.DBX6.2, M10.0, "
+            "MW20, MD30, I0.1, IW64, Q0.0, QW2"
+        )
+    if m["db"] is not None:
+        size, bit = m["dsize"], m["dbit"]
+        if (size == "X") != (bit is not None):
+            raise ValueError(f"{text!r}: DBX needs a bit (DB1.DBX6.2); other sizes take none")
+        db = int(m["db"])
+        if db < 1:
+            raise ValueError(f"{text!r}: DB numbers start at 1")
+        return S7Address(area=S7Area.DB, db=db, byte=int(m["dbyte"]),
+                         bit=int(bit) if bit else None, size=size)
+    letter = {"E": "I", "A": "Q"}.get(m["area"], m["area"])
+    bit = m["bit"]
+    if m["size"] and bit is not None:
+        raise ValueError(f"{text!r}: a bit address has no size letter (use M10.0, not MB10.0)")
+    if not m["size"] and bit is None:
+        raise ValueError(f"{text!r}: give a bit (M10.0) or a size (MB10, MW10, MD10)")
+    return S7Address(area=S7Area(letter), byte=int(m["byte"]),
+                     bit=int(bit) if bit else None, size=m["size"] or "X")
+
+
+# The S7 sizes each data type may be read with (S7 types in brackets)
+_S7_TYPES: dict[str, frozenset[DataType]] = {
+    "X": frozenset({DataType.BOOL}),
+    "B": frozenset({DataType.UINT16, DataType.INT16,                 # BYTE/USINT, SINT
+                    DataType.INT64, DataType.UINT64, DataType.FLOAT64,  # 8 bytes from here
+                    DataType.STRING}),
+    "W": frozenset({DataType.INT16, DataType.UINT16}),                 # INT, WORD/UINT
+    "D": frozenset({DataType.INT32, DataType.UINT32, DataType.FLOAT32}),  # DINT, DWORD, REAL
+}
+_S7_WIDE = frozenset({DataType.INT64, DataType.UINT64, DataType.FLOAT64})
+
+
+class S7Tag(TagBase):
+    """A Siemens S7 variable. Values are big-endian, as in the PLC.
+
+    * ``DBn.DBBx`` with int16/uint16 reads one byte (SINT / BYTE, USINT); with int64, uint64 or
+      float64 it reads 8 bytes from that byte (LINT, ULINT, LREAL); with string an S7 STRING
+      (2 header bytes + ``string_length`` characters).
+    * S7-1200/1500: the data block must have "optimized block access" switched off and the
+      CPU must allow PUT/GET communication.
+    """
+
+    address: str
+    string_length: int | None = Field(default=None, ge=1, le=254,
+                                      description="declared length of an S7 STRING")
+
+    @property
+    def parsed(self) -> S7Address:
+        return parse_s7_address(self.address)
+
+    @property
+    def byte_length(self) -> int:
+        a = self.parsed
+        if self.data_type is DataType.STRING:
+            return 2 + (self.string_length or 0)
+        if a.size == "B" and self.data_type in _S7_WIDE:
+            return 8
+        return S7_SIZE_BYTES[a.size]
+
+    @model_validator(mode="after")
+    def _check_s7(self) -> S7Tag:
+        a = parse_s7_address(self.address)
+        if self.data_type not in _S7_TYPES[a.size]:
+            allowed = ", ".join(sorted(str(x) for x in _S7_TYPES[a.size]))
+            raise ValueError(f"{self.address} ({a.size}) cannot hold {self.data_type}; "
+                             f"use one of: {allowed}")
+        if (self.data_type is DataType.STRING) != (self.string_length is not None):
+            raise ValueError("string tags need string_length (and only they take it)")
+        if self.access is Access.READ_WRITE and a.area is S7Area.INPUT:
+            raise ValueError("process inputs (I/E) are read-only; access must be read")
+        return self
+
+
+# --- HTTP / REST ----------------------------------------------------------------------------
+
+
+class HttpTag(TagBase):
+    """A value taken from a JSON response: ``path`` is appended to the device's base_url
+    (requests to the same path are made once per poll), ``json_path`` selects the value."""
+
+    path: str = Field(default="", max_length=512)
+    json_path: str
+
+    @field_validator("json_path")
+    @classmethod
+    def _check_json_path(cls, value: str) -> str:
+        parse_json_path(value)
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _check_path(cls, value: str) -> str:
+        if value and (not value.startswith("/") or any(c.isspace() for c in value)
+                      or "://" in value):
+            raise ValueError(f"{value!r}: path is relative to base_url and starts with '/'")
+        return value
+
+    @model_validator(mode="after")
+    def _read_only(self) -> HttpTag:
+        if self.access is Access.READ_WRITE:
+            raise ValueError("HTTP devices are read-only in the hub; access must be read")
+        return self
+
+
+# --- SNMP -----------------------------------------------------------------------------------
+
+_OID_RE = re.compile(r"[0-2](?:\.(?:0|[1-9]\d{0,9})){2,127}")
+
+
+def validate_oid(value: str) -> str:
+    value = value.strip().removeprefix(".")
+    if not _OID_RE.fullmatch(value):
+        raise ValueError(f"{value!r} is not a numeric OID (e.g. 1.3.6.1.2.1.1.3.0); "
+                         "MIB names are not resolved")
+    return value
+
+
+class SnmpTag(TagBase):
+    """One SNMP object, by numeric OID (e.g. 1.3.6.1.2.1.33.1.2.4.0 = UPS battery charge).
+    Counters (Counter32/64) arrive as integers; use history and reports (delta) for rates."""
+
+    oid: Annotated[str, AfterValidator(validate_oid)]
+
+    @model_validator(mode="after")
+    def _read_only(self) -> SnmpTag:
+        if self.access is Access.READ_WRITE:
+            raise ValueError("SNMP devices are read-only in the hub (no SET); access must be read")
+        return self
 
 
 # --------------------------------------------------------------------------------------------
@@ -557,6 +781,125 @@ class OpcUaConnection(_Strict):
         return self
 
 
+class S7Connection(_Strict):
+    """S7 over ISO-on-TCP (port 102). Rack/slot: S7-300 0/2, S7-400 see the hardware config,
+    S7-1200/1500 0/1 (or 0/0). LOGO! and S7-200 need other TSAP settings (not supported)."""
+
+    host: Host
+    port: int = Field(default=102, ge=1, le=65535)
+    rack: int = Field(default=0, ge=0, le=7)
+    slot: int = Field(default=1, ge=0, le=31)
+    timeout_ms: int = Field(default=2000, ge=100, le=60_000)
+    max_bytes_per_read: int = Field(default=200, ge=16, le=940,
+                                    description="largest block read at once (PDU size limit)")
+    max_gap_bytes: int = Field(default=16, ge=0, le=256,
+                               description="read across gaps up to this size to save requests")
+
+
+class HttpNoAuth(_Strict):
+    type: Literal["none"]
+
+
+class HttpBasicAuth(_Strict):
+    type: Literal["basic"]
+    username_env: EnvVarName
+    password_env: EnvVarName
+
+
+class HttpBearerAuth(_Strict):
+    type: Literal["bearer"]
+    token_env: EnvVarName
+
+
+class HttpHeaderAuth(_Strict):
+    """An API key sent in a header, e.g. ``X-Api-Key``."""
+
+    type: Literal["header"]
+    header: str = Field(pattern=r"^[A-Za-z0-9-]{1,64}$")
+    value_env: EnvVarName
+
+
+HttpAuth = Annotated[HttpNoAuth | HttpBasicAuth | HttpBearerAuth | HttpHeaderAuth,
+                     Field(discriminator="type")]
+_HTTP_BASE_RE = re.compile(r"https?://[^\s/:?#]+(?::\d{1,5})?(?:/[^\s?#]*)?")
+HeaderName = Annotated[str, Field(pattern=r"^[A-Za-z0-9-]{1,64}$")]
+
+
+class HttpConnection(_Strict):
+    base_url: str
+    auth: HttpAuth = HttpNoAuth(type="none")
+    headers: dict[HeaderName, Annotated[str, Field(max_length=256)]] = Field(
+        default_factory=dict, description="extra, non-secret headers (secrets go in auth)")
+    timeout_ms: int = Field(default=5000, ge=100, le=60_000)
+    verify_tls: bool = True
+    ca_file_env: EnvVarName | None = Field(default=None,
+                                           description="env var with the path of a CA bundle")
+    timestamp_path: str | None = None
+    timestamp_format: TimestampFormat | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        if not _HTTP_BASE_RE.fullmatch(value):
+            raise ValueError(f"{value!r} is not an http(s)://host[:port][/path] URL "
+                             "(no query string; put the path of each value in the tag)")
+        return value.rstrip("/")
+
+    @field_validator("timestamp_path")
+    @classmethod
+    def _check_timestamp_path(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_json_path(value)
+        return value
+
+    @model_validator(mode="after")
+    def _check(self) -> HttpConnection:
+        if (self.timestamp_path is None) != (self.timestamp_format is None):
+            raise ValueError("timestamp_path and timestamp_format go together")
+        if {h.lower() for h in self.headers} & {"authorization", "cookie", "x-api-key"}:
+            raise ValueError("credentials do not belong in headers; use auth with an env var")
+        if not self.verify_tls and self.ca_file_env:
+            raise ValueError("ca_file_env is only used when verify_tls is true")
+        return self
+
+
+class SnmpV2c(_Strict):
+    version: Literal["2c"]
+    community_env: EnvVarName = Field(description="env var holding the community string")
+
+
+AuthProtocol = Literal["md5", "sha", "sha224", "sha256", "sha384", "sha512"]
+PrivProtocol = Literal["des", "aes128", "aes192", "aes256"]
+
+
+class SnmpV3(_Strict):
+    version: Literal["3"]
+    username: str = Field(min_length=1, max_length=32)
+    auth_protocol: AuthProtocol | None = None
+    auth_key_env: EnvVarName | None = None
+    priv_protocol: PrivProtocol | None = None
+    priv_key_env: EnvVarName | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> SnmpV3:
+        if (self.auth_protocol is None) != (self.auth_key_env is None):
+            raise ValueError("auth_protocol and auth_key_env go together")
+        if (self.priv_protocol is None) != (self.priv_key_env is None):
+            raise ValueError("priv_protocol and priv_key_env go together")
+        if self.priv_protocol and not self.auth_protocol:
+            raise ValueError("encryption (priv) needs authentication (auth) in SNMPv3")
+        return self
+
+
+class SnmpConnection(_Strict):
+    host: Host
+    port: int = Field(default=161, ge=1, le=65535)
+    security: Annotated[SnmpV2c | SnmpV3, Field(discriminator="version")]
+    timeout_ms: int = Field(default=2000, ge=100, le=60_000)
+    retries: int = Field(default=1, ge=0, le=5)
+    max_oids_per_request: int = Field(default=20, ge=1, le=60)
+
+
 # --------------------------------------------------------------------------------------------
 # Devices
 # --------------------------------------------------------------------------------------------
@@ -609,12 +952,33 @@ class OpcUaDevice(DeviceBase):
     tags: list[OpcUaTag] = Field(default_factory=list)
 
 
+class S7Device(DeviceBase):
+    protocol: Literal["s7"]
+    connection: S7Connection
+    poll_interval_ms: PollInterval = 1000
+    tags: list[S7Tag] = Field(default_factory=list)
+
+
+class HttpDevice(DeviceBase):
+    protocol: Literal["http"]
+    connection: HttpConnection
+    poll_interval_ms: PollInterval = 5000
+    tags: list[HttpTag] = Field(default_factory=list)
+
+
+class SnmpDevice(DeviceBase):
+    protocol: Literal["snmp"]
+    connection: SnmpConnection
+    poll_interval_ms: PollInterval = 10_000
+    tags: list[SnmpTag] = Field(default_factory=list)
+
+
 AnyModbusDevice = ModbusDevice | ModbusRtuDevice
-Device = Annotated[ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice,
-                   Field(discriminator="protocol")]
-DEVICE_ADAPTER: TypeAdapter[ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice] = (
-    TypeAdapter(Device))
-PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua")
+AnyDeviceModel = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device
+                  | HttpDevice | SnmpDevice)
+Device = Annotated[AnyDeviceModel, Field(discriminator="protocol")]
+DEVICE_ADAPTER: TypeAdapter[AnyDeviceModel] = TypeAdapter(Device)
+PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp")
 
 
 # --------------------------------------------------------------------------------------------
@@ -623,6 +987,11 @@ PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua")
 
 
 class Broker(_Strict):
+    """An MQTT broker. With ``tls`` the broker certificate is checked against the system CAs, or
+    against ``ca_file_env`` (your own CA); ``client_certificate_env`` + ``client_private_key_env``
+    add a client certificate (mutual TLS). The ``*_env`` fields name environment variables that
+    hold file paths, so certificates and keys stay out of config."""
+
     broker_id: Segment
     host: Host
     port: int = Field(default=1883, ge=1, le=65535)
@@ -630,11 +999,21 @@ class Broker(_Strict):
     keepalive_s: int = Field(default=60, ge=5, le=3600)
     username_env: EnvVarName | None = None
     password_env: EnvVarName | None = None
+    ca_file_env: EnvVarName | None = None
+    client_certificate_env: EnvVarName | None = None
+    client_private_key_env: EnvVarName | None = None
+    tls_server_name: Host | None = Field(
+        default=None, description="name in the broker certificate when it differs from host")
 
     @model_validator(mode="after")
     def _check_credentials(self) -> Broker:
         if self.password_env and not self.username_env:
             raise ValueError("password_env requires username_env")
+        if (self.client_certificate_env is None) != (self.client_private_key_env is None):
+            raise ValueError("client_certificate_env and client_private_key_env go together")
+        uses_tls = (self.ca_file_env, self.client_certificate_env, self.tls_server_name)
+        if not self.tls and any(uses_tls):
+            raise ValueError("ca_file_env, client certificates and tls_server_name need tls: true")
         return self
 
 
@@ -809,6 +1188,137 @@ class ControlFile(_Strict):
         merged = self.defaults.model_dump()
         merged.update(override.model_dump(include=override.model_fields_set))
         return ControlPolicy.model_validate(merged)
+
+
+# --------------------------------------------------------------------------------------------
+# Northbound MQTT (config/northbound.yaml): publish tag values to another broker
+# --------------------------------------------------------------------------------------------
+
+
+class NorthboundTarget(_Strict):
+    """Publishes ``<topic_prefix>/<site>/<area>/<device_id>/<tag>`` with
+    ``{"v": value, "ts": "...Z", "q": "good", "u": unit}`` when a value or its quality changes,
+    and at least every ``heartbeat_s``. ``<topic_prefix>/status`` (retained) says ``online`` /
+    ``offline`` (the broker sends ``offline`` as last will if the hub disappears).
+    Output only: nothing received on the broker is written to a device."""
+
+    name: Segment
+    broker_ref: Segment
+    topic_prefix: Annotated[str, AfterValidator(validate_topic_name)] = "hub"
+    tags: list[str] = Field(default_factory=lambda: ["*"], min_length=1,
+                            description="tag path patterns (* and ? wildcards)")
+    qos: Literal[0, 1] = 1
+    retain: bool = False
+    heartbeat_s: int = Field(default=300, ge=5, le=86_400)
+    min_interval_s: float = Field(default=0.0, ge=0, le=3600,
+                                  description="at most one message per tag in this interval")
+    queue_max: int = Field(default=10_000, ge=10, le=1_000_000,
+                           description="messages kept while the broker is unreachable")
+
+    @field_validator("tags")
+    @classmethod
+    def _check_patterns(cls, value: list[str]) -> list[str]:
+        for pattern in value:
+            if not re.fullmatch(r"[a-z0-9_.*?]+", pattern):
+                raise ValueError(f"{pattern!r}: use tag path characters and * ? wildcards")
+        return value
+
+
+class NorthboundFile(_Strict):
+    targets: list[NorthboundTarget] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------------------------
+# Modbus TCP server (config/modbus_server.yaml): tag values for SCADA / HMI without OPC UA
+# --------------------------------------------------------------------------------------------
+
+
+class ModbusServerPoint(_Strict):
+    """One tag (or its quality) at a Modbus address of the hub's server.
+
+    ``source: quality`` publishes the quality code (0 good, 1 uncertain, 2 bad) in a register.
+    ``writable`` lets clients write the tag (holding registers and coils only); every write
+    goes through the control-safety layer as ``writes.as_user``."""
+
+    tag: TagPath
+    register_type: RegisterType
+    address: int = Field(ge=0, le=65535)
+    data_type: DataType | None = Field(default=None,
+                                       description="register format; default: the tag's type")
+    scale: float = Field(default=1.0, description="register = value / scale")
+    source: Literal["value", "quality"] = "value"
+    writable: bool = False
+
+    @property
+    def register_data_type(self) -> DataType:
+        if self.source == "quality":
+            return DataType.UINT16
+        return self.data_type or DataType.FLOAT32
+
+    @model_validator(mode="after")
+    def _check(self) -> ModbusServerPoint:
+        bit_area = self.register_type in BIT_REGISTER_TYPES
+        if self.source == "quality":
+            if bit_area or self.writable or self.data_type not in (None, DataType.UINT16):
+                raise ValueError("a quality point is a read-only uint16 holding/input register")
+        if self.data_type is DataType.STRING:
+            raise ValueError("string points are not supported")
+        if bit_area and self.data_type not in (None, DataType.BOOL):
+            raise ValueError(f"{self.register_type} points carry bool values")
+        if not bit_area and self.data_type is DataType.BOOL:
+            raise ValueError("bool points use register_type coil or discrete_input")
+        if self.writable and self.register_type in READ_ONLY_REGISTER_TYPES:
+            raise ValueError(f"{self.register_type} is read-only in Modbus; writable needs a "
+                             "holding register or a coil")
+        if self.scale == 0 or not math.isfinite(self.scale):
+            raise ValueError("scale must be finite and non-zero")
+        return self
+
+
+class ModbusServerWrites(_Strict):
+    """Modbus has no authentication: writes are accepted only from ``allowed_clients`` and are
+    made as the hub user ``as_user`` (whose roles and the control policy decide)."""
+
+    as_user: str = Field(min_length=3, max_length=64)
+    allowed_clients: list[str] = Field(min_length=1, description="IP addresses or networks")
+
+    @field_validator("allowed_clients")
+    @classmethod
+    def _check_networks(cls, value: list[str]) -> list[str]:
+        import ipaddress
+
+        for net in value:
+            ipaddress.ip_network(net, strict=False)
+        return value
+
+
+class ModbusServerFile(_Strict):
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = Field(default=502, ge=1, le=65535)
+    unit_id: int = Field(default=1, ge=1, le=247, description="clients may also use 0 or 255")
+    byte_order: Order = "big"
+    word_order: Order = "big"
+    allowed_clients: list[str] = Field(default_factory=list,
+                                       description="empty = any address may read")
+    max_clients: int = Field(default=16, ge=1, le=256)
+    points: list[ModbusServerPoint] = Field(default_factory=list)
+    writes: ModbusServerWrites | None = None
+
+    @field_validator("allowed_clients")
+    @classmethod
+    def _check_networks(cls, value: list[str]) -> list[str]:
+        import ipaddress
+
+        for net in value:
+            ipaddress.ip_network(net, strict=False)
+        return value
+
+    @model_validator(mode="after")
+    def _check_writes(self) -> ModbusServerFile:
+        if any(p.writable for p in self.points) and self.writes is None:
+            raise ValueError("writable points need a writes section (as_user, allowed_clients)")
+        return self
 
 
 # --------------------------------------------------------------------------------------------

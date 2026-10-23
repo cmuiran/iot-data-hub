@@ -5,6 +5,9 @@ Layout::
     config/
       brokers.yaml          MQTT brokers (list under ``brokers:``)
       devices/<device_id>.yaml   one device per file
+      alarms.yaml, control.yaml, notifications.yaml     (optional)
+      northbound.yaml       publish values to another MQTT broker (optional)
+      modbus_server.yaml    Modbus TCP server output for SCADA / HMI (optional)
 
 Each file is validated with the models in ``hub.models``; then cross-object checks run
 (duplicate ids, overlapping Modbus ranges, MQTT topic collisions, broker references, ...).
@@ -36,13 +39,25 @@ from hub.models import (
     Broker,
     BrokersFile,
     ControlFile,
+    BIT_REGISTER_TYPES,
+    MODBUS_WIDTH,
     DataType,
+    HttpBasicAuth,
+    HttpBearerAuth,
+    HttpDevice,
+    HttpHeaderAuth,
     ModbusDevice,
     ModbusRtuDevice,
+    ModbusServerFile,
     MqttDevice,
+    NorthboundFile,
     NotificationsFile,
     OpcUaDevice,
+    RegisterType,
+    S7Device,
     SecurityPolicy,
+    SnmpDevice,
+    SnmpV2c,
     TagBase,
     UsernameAuth,
     topics_overlap,
@@ -55,8 +70,11 @@ DEVICES_DIR = "devices"
 ALARMS_FILE = "alarms.yaml"
 CONTROL_FILE = "control.yaml"
 NOTIFICATIONS_FILE = "notifications.yaml"
+NORTHBOUND_FILE = "northbound.yaml"
+MODBUS_SERVER_FILE = "modbus_server.yaml"
 
-AnyDevice = ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice
+AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
+             | SnmpDevice)
 
 
 class Severity(StrEnum):
@@ -87,6 +105,9 @@ class ConfigReport:
     alarms: AlarmsFile = field(default_factory=AlarmsFile)
     control: ControlFile = field(default_factory=ControlFile)
     notifications: NotificationsFile = field(default_factory=NotificationsFile)
+    northbound: NorthboundFile = field(default_factory=NorthboundFile)
+    modbus_server: ModbusServerFile = field(
+        default_factory=lambda: ModbusServerFile(enabled=False))
     issues: list[Issue] = field(default_factory=list)
     # Every file that was read, mapped to its device_id (None if unknown or not a device file).
     sources: dict[str, str | None] = field(default_factory=dict)
@@ -213,9 +234,13 @@ def load_config(config_dir: Path | str, env: Mapping[str, str] | None = None) ->
     _load_optional(report, ALARMS_FILE, AlarmsFile, "alarms")
     _load_optional(report, CONTROL_FILE, ControlFile, "control")
     _load_optional(report, NOTIFICATIONS_FILE, NotificationsFile, "notifications")
+    _load_optional(report, NORTHBOUND_FILE, NorthboundFile, "northbound")
+    _load_optional(report, MODBUS_SERVER_FILE, ModbusServerFile, "modbus_server")
     _check_alarms(report)
     _check_control(report)
     _check_notifications(report, env)
+    _check_northbound(report)
+    _check_modbus_server(report)
 
     log.debug("config loaded: %d devices, %d issues", len(report.devices), len(report.issues))
     return report
@@ -307,7 +332,10 @@ def _check_brokers(report: ConfigReport, env: Mapping[str, str]) -> None:
             report,
             BROKERS_FILE,
             [(f"{where}.username_env", broker.username_env),
-             (f"{where}.password_env", broker.password_env)],
+             (f"{where}.password_env", broker.password_env),
+             (f"{where}.ca_file_env", broker.ca_file_env),
+             (f"{where}.client_certificate_env", broker.client_certificate_env),
+             (f"{where}.client_private_key_env", broker.client_private_key_env)],
             env,
         )
 
@@ -357,6 +385,57 @@ def _check_device(report: ConfigReport, loaded: LoadedDevice, env: Mapping[str, 
         _check_mqtt_device(report, device, source)
     elif isinstance(device, OpcUaDevice):
         _check_opcua_device(report, device, source, env)
+    elif isinstance(device, S7Device):
+        _warn_duplicate_addresses(report, source, [
+            (t.name, f"{t.address.upper()}") for t in device.tags], "address")
+    elif isinstance(device, HttpDevice):
+        _check_http_device(report, device, source, env)
+    elif isinstance(device, SnmpDevice):
+        _check_snmp_device(report, device, source, env)
+
+
+def _check_http_device(report: ConfigReport, device: HttpDevice, source: str,
+                       env: Mapping[str, str]) -> None:
+    c = device.connection
+    auth = c.auth
+    refs: list[tuple[str, str | None]] = [("connection.ca_file_env", c.ca_file_env)]
+    if isinstance(auth, HttpBasicAuth):
+        refs += [("connection.auth.username_env", auth.username_env),
+                 ("connection.auth.password_env", auth.password_env)]
+    elif isinstance(auth, HttpBearerAuth):
+        refs.append(("connection.auth.token_env", auth.token_env))
+    elif isinstance(auth, HttpHeaderAuth):
+        refs.append(("connection.auth.value_env", auth.value_env))
+    _warn_unset_env_vars(report, source, refs, env)
+    if auth.type != "none" and c.base_url.startswith("http://"):
+        report.add(Severity.WARNING, source,
+                   "credentials are sent unencrypted over http://; use https://",
+                   "connection.base_url")
+    if not c.verify_tls and c.base_url.startswith("https://"):
+        report.add(Severity.WARNING, source,
+                   "verify_tls: false accepts any certificate (no protection against a fake "
+                   "device); prefer ca_file_env", "connection.verify_tls")
+    _warn_duplicate_addresses(report, source, [
+        (t.name, f"{t.path} {t.json_path}") for t in device.tags], "path/json_path")
+
+
+def _check_snmp_device(report: ConfigReport, device: SnmpDevice, source: str,
+                       env: Mapping[str, str]) -> None:
+    sec = device.connection.security
+    if isinstance(sec, SnmpV2c):
+        _warn_unset_env_vars(report, source, [("connection.security.community_env",
+                                               sec.community_env)], env)
+        report.add(Severity.WARNING, source,
+                   "SNMPv2c sends the community in clear text; prefer SNMPv3 with auth and priv",
+                   "connection.security")
+    else:
+        _warn_unset_env_vars(report, source, [
+            ("connection.security.auth_key_env", sec.auth_key_env),
+            ("connection.security.priv_key_env", sec.priv_key_env)], env)
+        if sec.priv_protocol is None:
+            report.add(Severity.WARNING, source, "SNMPv3 without priv: values travel "
+                       "unencrypted", "connection.security")
+    _warn_duplicate_addresses(report, source, [(t.name, t.oid) for t in device.tags], "oid")
 
 
 def _check_modbus_device(report: ConfigReport, device: ModbusDevice | ModbusRtuDevice,
@@ -379,9 +458,10 @@ def _check_modbus_device(report: ConfigReport, device: ModbusDevice | ModbusRtuD
             continue
         if a.bit is not None or b.bit is not None:
             # Bit tags may share a register with other bits and with the whole-word tag
-            # (e.g. a raw status word next to its decoded flags); only the same bit twice is
-            # a mistake.
-            if a.bit == b.bit and a.address == b.address:
+            # (e.g. a raw status word next to its decoded flags); only overlapping bits of the
+            # same register are a mistake.
+            if (a.bit is not None and b.bit is not None and a.address == b.address
+                    and _bits(a) & _bits(b)):
                 report.add(
                     Severity.ERROR,
                     source,
@@ -397,6 +477,11 @@ def _check_modbus_device(report: ConfigReport, device: ModbusDevice | ModbusRtuD
             f"tags[{i}] ({a.name}) at {a.address}..{a.last_address}",
             _tag_loc(j, b.name, "address"),
         )
+
+
+def _bits(tag: ModbusTag) -> set[int]:
+    start = tag.bit or 0
+    return set(range(start, start + (tag.bit_count or 1)))
 
 
 def _check_mqtt_device(report: ConfigReport, device: MqttDevice, source: str) -> None:
@@ -626,6 +711,80 @@ def _check_control(report: ConfigReport) -> None:
                            "a number", loc)
             elif lock.op in ("lt", "le", "gt", "ge") and not _is_numeric(ttag):
                 report.add(Severity.ERROR, CONTROL_FILE, f"{lock.op} needs a numeric tag", loc)
+
+
+def _check_northbound(report: ConfigReport) -> None:
+    import fnmatch
+
+    names: set[str] = set()
+    paths = list(report.tags_by_path())
+    for i, target in enumerate(report.northbound.targets):
+        where = f"targets[{i}] ({target.name})"
+        if target.name in names:
+            report.add(Severity.ERROR, NORTHBOUND_FILE, f"duplicate target name {target.name!r}",
+                       where)
+        names.add(target.name)
+        if target.broker_ref not in report.brokers:
+            known = ", ".join(sorted(report.brokers)) or "none"
+            report.add(Severity.ERROR, NORTHBOUND_FILE, f"unknown broker {target.broker_ref!r} "
+                       f"(brokers in {BROKERS_FILE}: {known})", f"{where}.broker_ref")
+        for pattern in target.tags:
+            if not any(fnmatch.fnmatchcase(p, pattern) for p in paths):
+                report.add(Severity.WARNING, NORTHBOUND_FILE,
+                           f"pattern {pattern!r} matches no tag", f"{where}.tags")
+
+
+def _check_modbus_server(report: ConfigReport) -> None:
+    cfg = report.modbus_server
+    tags = report.tags_by_path()
+    used: dict[tuple[RegisterType, int], int] = {}
+    for i, point in enumerate(cfg.points):
+        where = f"points[{i}] ({point.tag})"
+        found = tags.get(point.tag)
+        if found is None:
+            report.add(Severity.ERROR, MODBUS_SERVER_FILE, f"unknown tag {point.tag}", where)
+            continue
+        tag = found[1]
+        if point.source == "value" and tag.data_type is DataType.STRING:
+            report.add(Severity.ERROR, MODBUS_SERVER_FILE, "string tags cannot be served",
+                       where)
+            continue
+        bit_area = point.register_type in BIT_REGISTER_TYPES
+        if point.source == "value" and bit_area and tag.data_type is not DataType.BOOL:
+            report.add(Severity.ERROR, MODBUS_SERVER_FILE,
+                       f"{point.register_type} needs a bool tag; {point.tag} is "
+                       f"{tag.data_type}", where)
+        if point.writable:
+            if tag.access is not Access.READ_WRITE:
+                report.add(Severity.ERROR, MODBUS_SERVER_FILE,
+                           f"{point.tag} is read-only in its device config; it cannot be "
+                           "writable here", f"{where}.writable")
+            if tag.data_type is DataType.BOOL and point.register_type is not RegisterType.COIL:
+                report.add(Severity.ERROR, MODBUS_SERVER_FILE,
+                           "a writable bool tag is served as a coil", f"{where}.register_type")
+        if point.source == "quality" or bit_area:
+            width = 1
+        else:
+            dtype = point.data_type or (DataType.FLOAT32 if tag.data_type is DataType.BOOL
+                                        else tag.data_type)
+            width = MODBUS_WIDTH[dtype]
+        if point.address + width - 1 > 65535:
+            report.add(Severity.ERROR, MODBUS_SERVER_FILE, "address range exceeds 65535",
+                       f"{where}.address")
+        for a in range(point.address, point.address + width):
+            key = (point.register_type, a)
+            if key in used:
+                j = used[key]
+                report.add(Severity.ERROR, MODBUS_SERVER_FILE,
+                           f"{point.register_type} {a} is already used by points[{j}] "
+                           f"({cfg.points[j].tag})", f"{where}.address")
+                break
+            used[key] = i
+    if cfg.enabled and cfg.points and cfg.host not in ("127.0.0.1", "localhost", "::1") \
+            and not cfg.allowed_clients:
+        report.add(Severity.WARNING, MODBUS_SERVER_FILE,
+                   "Modbus has no authentication: limit readers with allowed_clients "
+                   "(e.g. the SCADA server's address)", "allowed_clients")
 
 
 def _check_notifications(report: ConfigReport, env: Mapping[str, str]) -> None:

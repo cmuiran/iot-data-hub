@@ -191,6 +191,8 @@ export function unitText(unit) { return unit ? (UNITS[unit] || unit) : ''; }
 /** A tag value for display: number with unit, bool as words, '—' when missing. */
 export function valueText(tag, value) {
   if (value === null || value === undefined) return '—';
+  const label = tag?.states?.[typeof value === 'boolean' ? Number(value) : value];
+  if (label !== undefined) return label;
   if (typeof value === 'boolean' || tag?.data_type === 'bool') {
     const key = value ? 'true' : 'false';
     return tMaybe(`tag_words.${tag?.name}.${key}`) || t(`bool.${key}`);
@@ -204,7 +206,8 @@ export function valueText(tag, value) {
 
 export function valueNode(tag, value) {
   const text = valueText(tag, value);
-  const unit = typeof value === 'number' ? unitText(tag?.unit) : '';
+  const labelled = tag?.states?.[typeof value === 'boolean' ? Number(value) : value] !== undefined;
+  const unit = typeof value === 'number' && !labelled ? unitText(tag?.unit) : '';
   return h('span', null, text, unit ? h('span', { class: 'unit' }, unit) : null);
 }
 

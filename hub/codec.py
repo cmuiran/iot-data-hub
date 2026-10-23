@@ -116,6 +116,41 @@ def decode_bit(register: int, bit: int) -> bool:
     return bool((register >> bit) & 1)
 
 
+def decode_bit_field(register: int, bit: int, count: int) -> int:
+    """Unsigned field of ``count`` bits starting at ``bit`` (0 = LSB) of a 16-bit register."""
+    return (register >> bit) & ((1 << count) - 1)
+
+
+def decode_bcd(registers: list[int], word_order: Order = "big") -> int:
+    """Packed BCD: four decimal digits per register, most significant digit first.
+
+    The registers of a two-register value follow ``word_order``; a nibble above 9 is not BCD
+    (a wrong register or a device fault) and raises instead of producing a plausible number.
+    """
+    words = list(registers) if word_order == "big" else list(reversed(registers))
+    value = 0
+    for word in words:
+        if not 0 <= word <= 0xFFFF:
+            raise CodecError(f"register values must be 0..65535, got {word}")
+        for shift in (12, 8, 4, 0):
+            digit = (word >> shift) & 0xF
+            if digit > 9:
+                raise CodecError(f"0x{word:04X} is not BCD (digit {digit})")
+            value = value * 10 + digit
+    return value
+
+
+def encode_bcd(raw: Value, registers: int, word_order: Order = "big") -> list[int]:
+    if isinstance(raw, bool) or not isinstance(raw, int | float) or float(raw) != int(raw):
+        raise CodecError(f"BCD needs a whole number, got {raw!r}")
+    value = int(raw)
+    if not 0 <= value < 10 ** (4 * registers):
+        raise CodecError(f"{value} does not fit {4 * registers} BCD digits")
+    digits = str(value).rjust(4 * registers, "0")
+    words = [int(digits[i : i + 4], 16) for i in range(0, len(digits), 4)]
+    return words if word_order == "big" else list(reversed(words))
+
+
 # --------------------------------------------------------------------------------------------
 # Scaling
 # --------------------------------------------------------------------------------------------

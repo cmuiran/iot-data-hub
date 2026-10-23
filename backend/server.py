@@ -50,6 +50,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--embedded-db", type=Path, metavar="DIR",
                         help="dev only: run a local PostgreSQL in DIR")
     parser.add_argument("--log-level", default="info")
+    parser.add_argument("--env-file", type=Path, action="append", default=[],
+                        help="extra KEY=value file(s), read before .env (e.g. .sim/sim.env)")
     return parser.parse_args(argv)
 
 
@@ -104,6 +106,11 @@ async def serve(settings: Settings) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(args.log_level)
+    for env_file in args.env_file:
+        if not env_file.is_file():
+            print(f"--env-file {env_file}: no such file", file=sys.stderr)
+            return 2
+        load_dotenv(env_file)
     load_dotenv()
     try:
         settings = Settings.from_env(dev=args.dev)

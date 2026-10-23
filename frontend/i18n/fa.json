@@ -102,7 +102,10 @@
   "modbus_tcp": "Modbus TCP",
   "modbus_rtu": "Modbus RTU",
   "mqtt": "MQTT / JSON",
-  "opcua": "OPC UA"
+  "opcua": "OPC UA",
+  "s7": "Siemens S7",
+  "http": "HTTP / REST",
+  "snmp": "SNMP"
  },
  "roles": {
   "admin": "مدیر سیستم",
@@ -185,7 +188,10 @@
  "areas": {
   "warehouse": "انبار",
   "substation": "پست برق",
-  "pump_station": "ایستگاه پمپاژ"
+  "pump_station": "ایستگاه پمپاژ",
+  "water_treatment": "تصفیه آب",
+  "solar_roof": "خورشیدی پشت‌بام",
+  "server_room": "اتاق سرور"
  },
  "tag_names": {
   "temperature": "دما",
@@ -898,7 +904,26 @@
   "result": "نتیجه",
   "detail": "جزئیات",
   "config_issues": "بررسی پیکربندی",
-  "config_clean": "مشکلی پیدا نشد"
+  "config_clean": "مشکلی پیدا نشد",
+  "outputs": "خروجی به سیستم‌های دیگر",
+  "northbound": "انتشار MQTT به مرکز",
+  "target": "مقصد",
+  "state": "وضعیت",
+  "connected": "متصل",
+  "disconnected": "قطع",
+  "published": "ارسال‌شده",
+  "queued": "در صف",
+  "dropped": "از دست رفته",
+  "no_northbound": "تنظیم نشده (config/northbound.yaml)",
+  "modbus_server": "سرور Modbus TCP",
+  "address": "نشانی",
+  "points": "نقطه‌ها",
+  "writes": "نوشتن",
+  "writes_on": "برای کلاینت‌های مجاز، از مسیر لایه ایمنی",
+  "writes_off": "فقط خواندنی",
+  "clients": "کلاینت‌های متصل",
+  "requests": "شمارنده‌ها",
+  "no_modbus_server": "تنظیم نشده (config/modbus_server.yaml)"
  },
  "account": {
   "title": "حساب من",

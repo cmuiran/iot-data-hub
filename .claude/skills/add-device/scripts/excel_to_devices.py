@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Convert a devices workbook into config/devices/<device_id>.yaml files.
 
-Sheets (see templates/devices_template.xlsx): Devices, ModbusRegisters, MqttTags, OpcuaTags.
+Sheets (see templates/devices_template.xlsx): Devices, ModbusRegisters, MqttTags, OpcuaTags,
+S7Tags, HttpTags, SnmpTags. A ``states`` cell labels values: ``0=stopped; 1=running``.
 Rows whose first cell starts with '#' are comments and are skipped. Empty cells are omitted so
 the model defaults apply. A cell containing TODO means "unknown": the tag is left out (and
 listed in the file header) or, for host / unit_id / endpoint_url only, a visible placeholder is
@@ -42,7 +43,8 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("openpyxl is required for this helper: pip install openpyxl")
 
-PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua")
+PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp")
+TAG_SHEETS = ("ModbusRegisters", "MqttTags", "OpcuaTags", "S7Tags", "HttpTags", "SnmpTags")
 TODO_RE = re.compile(r"^\s*todo\b", re.IGNORECASE)
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -208,6 +210,23 @@ def convert_modbus_address(
 # ---------------------------------------------------------------------------------------------
 
 
+def parse_states(value: Any, where: str, res: Result) -> dict[int, str] | None:
+    """``0=stopped; 1=running`` (also ``,`` or new lines between items) -> {0: "stopped", ...}."""
+    if value is None or value is TODO:
+        return None
+    out: dict[int, str] = {}
+    for item in re.split(r"[;,\n]+", str(value)):
+        if not item.strip():
+            continue
+        key, sep, label = item.partition("=")
+        number = parse_int(key.strip().translate(_DIGITS))
+        if not sep or number is None or not label.strip():
+            res.errors.append(f"{where}: {item.strip()!r} is not value=label")
+            return None
+        out[number] = label.strip()
+    return out or None
+
+
 def put(target: dict[str, Any], key: str, value: Any) -> None:
     if value is not None and value is not TODO:
         target[key] = value
@@ -245,6 +264,9 @@ def build_tag(
         tag["history"] = False
     put(tag, "history_deadband", as_number(rec.get("history_deadband"),
                                            f"{where}.history_deadband", res))
+    states = parse_states(rec.get("states"), f"{where}.states", res)
+    if states:
+        tag["states"] = states
     access = rec.get("access")
     if access not in (None, TODO) and str(access).lower() != "read":
         tag["access"] = str(access).lower()
@@ -280,6 +302,12 @@ def modbus_tags(rows: list[tuple[int, dict[str, Any]]], res: Result) -> list[dic
         count = as_number(rec.get("count"), f"{label}.count", res, integer=True)
         if count is not None:
             extras["count"] = count
+        bit_count = as_number(rec.get("bit_count"), f"{label}.bit_count", res, integer=True)
+        if bit_count is not None:
+            extras["bit_count"] = bit_count
+        encoding = rec.get("encoding")
+        if encoding not in (None, TODO) and str(encoding).lower() != "binary":
+            extras["encoding"] = str(encoding).lower()
         tag = build_tag(row, rec, "ModbusRegisters", res, extras)
         if tag:
             tags.append(tag)
@@ -287,15 +315,24 @@ def modbus_tags(rows: list[tuple[int, dict[str, Any]]], res: Result) -> list[dic
 
 
 def simple_tags(
-    rows: list[tuple[int, dict[str, Any]]], sheet: str, key: str, res: Result
+    rows: list[tuple[int, dict[str, Any]]], sheet: str, key: str, res: Result,
+    optional: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
+    """Tags addressed by one ``key`` column (json_path, node_id, address, oid); ``optional``
+    columns are copied when filled (path, string_length)."""
     tags = []
     for row, rec in rows:
         value = rec.get(key)
         if value in (None, TODO):
             res.todos.append(f"{sheet} row {row} ({rec.get('tag')}): {key} unknown; tag skipped")
             continue
-        tag = build_tag(row, rec, sheet, res, {key: str(value)})
+        extras: dict[str, Any] = {key: str(value)}
+        for extra in optional:
+            cell = rec.get(extra)
+            if cell not in (None, TODO):
+                extras[extra] = (as_number(cell, f"{sheet} row {row}.{extra}", res, integer=True)
+                                 if extra == "string_length" else str(cell))
+        tag = build_tag(row, rec, sheet, res, extras)
         if tag:
             tags.append(tag)
     return tags
@@ -404,6 +441,75 @@ def build_device(
         put(conn, "stale_after_s", number("stale_after_s", integer=False))
         tags = simple_tags(tags_by_device["MqttTags"].get(device_id, []), "MqttTags",
                            "json_path", res)
+    elif protocol == "s7":
+        if rec.get("host") in (None, TODO):
+            conn["host"] = PLACEHOLDER_HOST
+            placeholder_used = True
+            res.todos.append(f"{where}: host unknown -> placeholder {PLACEHOLDER_HOST}")
+        else:
+            conn["host"] = str(rec["host"])
+        for key in ("port", "rack", "slot", "timeout_ms"):
+            put(conn, key, number(key))
+        if rec.get("rack") in (None, TODO) or rec.get("slot") in (None, TODO):
+            res.todos.append(f"{where}: rack/slot not given -> 0/1 (S7-1200/1500); S7-300 "
+                             "uses 0/2")
+        tags = simple_tags(tags_by_device["S7Tags"].get(device_id, []), "S7Tags", "address",
+                           res, optional=("string_length",))
+    elif protocol == "http":
+        conn["base_url"] = required_text(rec, "base_url", where, res)
+        auth = str(rec.get("auth_type") or "none").lower()
+        if auth == "basic":
+            conn["auth"] = {"type": "basic",
+                            "username_env": required_text(rec, "username_env", where, res),
+                            "password_env": required_text(rec, "password_env", where, res)}
+        elif auth == "bearer":
+            conn["auth"] = {"type": "bearer",
+                            "token_env": required_text(rec, "token_env", where, res)}
+        elif auth == "header":
+            conn["auth"] = {"type": "header",
+                            "header": required_text(rec, "auth_header", where, res),
+                            "value_env": required_text(rec, "value_env", where, res)}
+        elif auth != "none":
+            res.errors.append(f"{where}: auth_type must be none, basic, bearer or header")
+        verify = as_bool(rec.get("verify_tls"), f"{where}.verify_tls", res)
+        if verify is False:
+            conn["verify_tls"] = False
+            res.todos.append(f"{where}: verify_tls false accepts any certificate")
+        put(conn, "ca_file_env", rec.get("ca_file_env"))
+        put(conn, "timeout_ms", number("timeout_ms"))
+        put(conn, "timestamp_path", rec.get("timestamp_path"))
+        if rec.get("timestamp_format") not in (None, TODO):
+            conn["timestamp_format"] = str(rec["timestamp_format"]).lower()
+        tags = simple_tags(tags_by_device["HttpTags"].get(device_id, []), "HttpTags",
+                           "json_path", res, optional=("path",))
+    elif protocol == "snmp":
+        if rec.get("host") in (None, TODO):
+            conn["host"] = PLACEHOLDER_HOST
+            placeholder_used = True
+            res.todos.append(f"{where}: host unknown -> placeholder {PLACEHOLDER_HOST}")
+        else:
+            conn["host"] = str(rec["host"])
+        put(conn, "port", number("port"))
+        version = str(rec.get("snmp_version") or "").lower().removeprefix("v")
+        if version == "2c":
+            conn["security"] = {"version": "2c",
+                                "community_env": required_text(rec, "community_env", where,
+                                                               res)}
+        elif version == "3":
+            sec: dict[str, Any] = {"version": "3",
+                                   "username": required_text(rec, "snmp_user", where, res)}
+            for key in ("auth_protocol", "priv_protocol"):
+                if rec.get(key) not in (None, TODO):
+                    sec[key] = str(rec[key]).lower()
+            for key in ("auth_key_env", "priv_key_env"):
+                put(sec, key, rec.get(key))
+            conn["security"] = sec
+        else:
+            res.errors.append(f"{where}: snmp_version must be 2c or 3")
+        for key in ("timeout_ms", "retries"):
+            put(conn, key, number(key))
+        tags = simple_tags(tags_by_device["SnmpTags"].get(device_id, []), "SnmpTags", "oid",
+                           res)
     else:  # opcua
         if rec.get("endpoint_url") in (None, TODO):
             conn["endpoint_url"] = PLACEHOLDER_ENDPOINT
@@ -520,11 +626,7 @@ def main(argv: list[str] | None = None) -> int:
         print("sheet 'Devices' not found", file=sys.stderr)
         return 2
 
-    tags_by_device = {
-        "ModbusRegisters": group_by_device(read_sheet(wb, "ModbusRegisters")),
-        "MqttTags": group_by_device(read_sheet(wb, "MqttTags")),
-        "OpcuaTags": group_by_device(read_sheet(wb, "OpcuaTags")),
-    }
+    tags_by_device = {sheet: group_by_device(read_sheet(wb, sheet)) for sheet in TAG_SHEETS}
     device_rows = read_sheet(wb, "Devices")
     known_ids = {str(r.get("device_id")).lower() for _, r in device_rows if r.get("device_id")}
     failed = False

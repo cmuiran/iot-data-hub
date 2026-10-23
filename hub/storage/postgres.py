@@ -22,13 +22,16 @@ from psycopg_pool import AsyncConnectionPool
 
 from hub.drivers.base import AnyDevice, DeviceStatus
 from hub.models import (
-    INTEGER_RANGES,
-    QUALITY_CODES,
     DataType,
+    HttpTag,
+    INTEGER_RANGES,
     ModbusTag,
     MqttTag,
     OpcUaTag,
+    QUALITY_CODES,
+    S7Tag,
     Sample,
+    SnmpTag,
     TagBase,
 )
 from hub.storage.records import (
@@ -92,11 +95,20 @@ def _join(data_type: str, num: float | None, flag: bool | None, text: str | None
 def _address(tag: TagBase) -> dict[str, Any]:
     if isinstance(tag, ModbusTag):
         return {k: v for k, v in {"register_type": str(tag.register_type), "address": tag.address,
-                                  "bit": tag.bit, "count": tag.count}.items() if v is not None}
+                                  "bit": tag.bit, "bit_count": tag.bit_count, "count": tag.count,
+                                  "encoding": None if tag.encoding == "binary" else tag.encoding,
+                                  }.items() if v is not None}
     if isinstance(tag, MqttTag):
         return {"json_path": tag.json_path}
     if isinstance(tag, OpcUaTag):
         return {"node_id": tag.node_id}
+    if isinstance(tag, S7Tag):
+        return {"address": tag.address} | (
+            {"string_length": tag.string_length} if tag.string_length else {})
+    if isinstance(tag, HttpTag):
+        return {"path": tag.path, "json_path": tag.json_path}
+    if isinstance(tag, SnmpTag):
+        return {"oid": tag.oid}
     return {}
 
 

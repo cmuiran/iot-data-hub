@@ -34,22 +34,44 @@ def free_port() -> int:
 
 
 class EmbeddedBroker:
-    """Anonymous MQTT broker on 127.0.0.1 for tests and local development."""
+    """Anonymous MQTT broker on 127.0.0.1 for tests and local development.
 
-    def __init__(self, port: int | None = None) -> None:
+    ``tls``: ``{"certfile", "keyfile", "cafile", "require_client_cert"}`` makes it a TLS
+    listener; with ``require_client_cert`` a client without a certificate from ``cafile`` is
+    refused during the handshake (mutual TLS), like a hardened production broker.
+    """
+
+    def __init__(self, port: int | None = None, tls: dict[str, Any] | None = None) -> None:
         self.host = "127.0.0.1"
         self.port = port or free_port()
+        self.tls = tls
         self._broker: Any = None
 
     async def start(self) -> None:
         from amqtt.broker import Broker
 
+        listener: dict[str, Any] = {"type": "tcp", "bind": f"{self.host}:{self.port}"}
+        if self.tls:
+            listener.update(ssl=True, certfile=self.tls["certfile"], keyfile=self.tls["keyfile"],
+                            cafile=self.tls.get("cafile"))
         config = {
-            "listeners": {"default": {"type": "tcp", "bind": f"{self.host}:{self.port}"}},
+            "listeners": {"default": listener},
             "plugins": {"amqtt.plugins.authentication.AnonymousAuthPlugin":
                         {"allow_anonymous": True}},
         }
         self._broker = Broker(config)
+        if self.tls and self.tls.get("require_client_cert"):
+            import ssl
+
+            tls = self.tls
+
+            def required(_: Any) -> ssl.SSLContext:
+                ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH, cafile=tls["cafile"])
+                ctx.load_cert_chain(tls["certfile"], tls["keyfile"])
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                return ctx
+
+            self._broker._create_ssl_context = required  # noqa: SLF001
         await self._broker.start()
 
     async def stop(self) -> None:

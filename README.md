@@ -1,6 +1,7 @@
 # Industrial IoT Data Hub
 
-Collects data from field devices over **Modbus TCP**, **MQTT/JSON** and **OPC UA**, normalizes it
+Collects data from field devices over **Modbus TCP/RTU**, **MQTT/JSON**, **OPC UA**, **Siemens S7**,
+**HTTP/REST** and **SNMP**, normalizes it
 into one data model, stores history in PostgreSQL (+ TimescaleDB), raises alarms, and serves a
 REST + WebSocket API with user management, RBAC and a control-safety layer for writes, and a
 Persian/English web dashboard. Project rules: [CLAUDE.md](CLAUDE.md). Backend details, API
@@ -10,13 +11,13 @@ reference and operations: [docs/backend.md](docs/backend.md); dashboard: [docs/f
 
 | Area | Contents | State |
 |---|---|---|
-| Devices | Modbus TCP, Modbus RTU (serial, RFC 2217, RTU over TCP), MQTT/JSON, OPC UA client (incl. Basic256Sha256 certificates) | done |
+| Devices | Modbus TCP, Modbus RTU (serial, RFC 2217, RTU over TCP; bit fields, BCD), MQTT/JSON (TLS with plant CA and client certificates), OPC UA client (incl. Basic256Sha256 certificates), Siemens S7 (S7comm), HTTP/REST JSON, SNMP v2c/v3; value labels | done |
 | Data | live cache, PostgreSQL/TimescaleDB, deadband/heartbeat filter, hourly roll-up, retention, daily backups | done |
 | Alarms | limits, offline, ack, shelving, notifications (e-mail, Telegram, SMS gateway, webhook) | done |
 | Users | login, lockout, IP throttling, rotating refresh tokens, sessions, RBAC by site/area, audit | done |
 | Control | 8-gate safety layer, two-person confirmation, read-back, scheduled sequences | done |
 | API | REST + WebSocket, config changes without restart, reports (Excel/CSV), dashboards storage | done |
-| Integration | OPC UA server for SCADA (encrypted, writes via the safety layer), Prometheus metrics | done |
+| Integration | OPC UA server and Modbus TCP server for SCADA (writes via the safety layer), northbound MQTT to a central broker, Prometheus metrics | done |
 | Operations | Windows service (WinSW), rotating logs with redaction, active/standby HA | done |
 | Security hardening | HTTPS, MFA (TOTP), idle timeout, password history/expiry, network allowlist, rate limit, WebSocket origin check, encrypted backups, tamper-evident audit, certificate expiry alarms | done |
 | Web dashboard (fa/en, RTL) | live overview, devices, alarms (horn, notifications), trends, reports, control with two-person confirmation, schedules, dashboard builder, users, configuration, audit, system; Jalali calendar; light/dark; phone layout | done |
@@ -38,7 +39,7 @@ Run the whole system against simulated devices (two terminals):
 ```
 .venv\Scripts\hub-sim.exe --config-dir config --out .sim
 .venv\Scripts\hub-admin.exe --embedded-db .sim/db create-admin --username boss
-.venv\Scripts\hub-api.exe --config-dir .sim/config --dev --embedded-db .sim/db
+.venv\Scripts\hub-api.exe --config-dir .sim/config --env-file .sim/sim.env --dev --embedded-db .sim/db
 ```
 
 Then open http://127.0.0.1:8000/ and sign in (the API itself: http://127.0.0.1:8000/api/docs).
@@ -60,11 +61,11 @@ config/          brokers.yaml, devices/*.yaml, alarms.yaml, control.yaml, notifi
 hub/             models, config loader, codec, drivers, alarm engine, runtime, storage
 backend/         FastAPI app, auth, RBAC, control-safety layer, server/admin CLIs
 frontend/        web dashboard (served by hub-api at /): index.html, css/, js/, i18n/fa.json + en.json
-simulators/      Modbus TCP server, MQTT broker + devices, OPC UA server, hub-sim
-db/migrations/   0001_core, 0002_timescale (optional), 0003_operations, 0004_security
+simulators/      Modbus TCP, MQTT broker + devices, OPC UA, S7 PLC, HTTP/JSON, SNMP agent; hub-sim
+db/migrations/   0001_core, 0002_timescale (optional), 0003_operations, 0004_security, 0005_protocols
 scripts/windows/ install-service.ps1 / uninstall-service.ps1 (WinSW)
 docs/            backend.md, frontend.md, device_catalog.xlsx
-tests/           unit, drivers, storage, api, e2e, frontend (530+ tests, no hardware needed)
+tests/           unit, drivers, storage, api, e2e, frontend (600+ tests, no hardware needed)
 .claude/skills/  add-device: onboard devices from datasheets, payloads, Excel
 ```
 

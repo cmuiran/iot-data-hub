@@ -1,0 +1,48 @@
+# Server room UPS over SNMPv3 (UPS-MIB, RFC 1628; numeric OIDs, read-only).
+device_id: ups_01
+name: Server room UPS
+site: kish
+area: server_room
+protocol: snmp
+enabled: true
+poll_interval_ms: 10000
+connection:
+  host: 192.168.10.80
+  security:
+    version: "3"
+    username: hubmon
+    auth_protocol: sha256
+    auth_key_env: HUB_UPS01_AUTH_KEY
+    priv_protocol: aes128
+    priv_key_env: HUB_UPS01_PRIV_KEY
+tags:
+  - name: battery_status
+    data_type: int16
+    oid: 1.3.6.1.2.1.33.1.2.1.0
+    states: {1: unknown, 2: normal, 3: low, 4: depleted}
+  - name: battery_charge
+    unit: "%"
+    data_type: uint16
+    oid: 1.3.6.1.2.1.33.1.2.4.0
+    min: 0
+    max: 100
+  - name: runtime_left
+    unit: min
+    data_type: uint16
+    oid: 1.3.6.1.2.1.33.1.2.3.0
+  - name: input_voltage
+    unit: V
+    data_type: uint16
+    oid: 1.3.6.1.2.1.33.1.3.3.1.3.1
+    min: 180
+    max: 260
+  - name: output_load
+    unit: "%"
+    data_type: uint16
+    oid: 1.3.6.1.2.1.33.1.4.4.1.5.1
+    min: 0
+    max: 100
+  - name: output_source
+    data_type: int16
+    oid: 1.3.6.1.2.1.33.1.4.1.0
+    states: {1: other, 2: none, 3: normal, 4: bypass, 5: battery, 6: booster, 7: reducer}

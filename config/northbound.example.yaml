@@ -1,0 +1,20 @@
+# Copy to northbound.yaml to publish tag values to another MQTT broker (head office, SCADA,
+# cloud). Output only: nothing received from that broker is written to a device.
+#
+# Topics:  <topic_prefix>/<site>/<area>/<device_id>/<tag>  ->  {"v": 23.4, "ts": "...Z", "q": "good", "u": "degC"}
+#          <topic_prefix>/status  (retained)              ->  {"state": "online" | "offline", ...}
+#
+# The broker comes from brokers.yaml (use tls: true with ca_file_env / client certificates for a
+# connection that leaves the plant network).
+targets:
+  - name: head_office
+    broker_ref: head_office
+    topic_prefix: gatekish/hub
+    tags:                       # tag path patterns, * and ? wildcards
+      - kish.substation.*
+      - kish.pump_station.*.discharge_pressure
+    qos: 1
+    retain: false
+    heartbeat_s: 300            # republish unchanged values this often
+    min_interval_s: 1           # at most one message per tag and second
+    queue_max: 10000            # kept while the broker is unreachable

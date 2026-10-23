@@ -18,7 +18,7 @@ router = APIRouter(tags=["system"])
 Auditor = Annotated[Principal, Depends(require("audit.read"))]
 Engineer = Annotated[Principal, Depends(require("config.edit"))]
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 @router.get("/api/health")
@@ -47,6 +47,19 @@ async def info(svc: ServicesDep, _: Annotated[Principal, Depends(require("self")
             "timezone": svc.settings.timezone, "control_enabled": svc.settings.control_enabled,
             "session_idle_minutes": svc.settings.session_idle_minutes,
             "password_min_length": svc.settings.password_min_length}
+
+
+@router.get("/api/system/outputs")
+async def outputs(svc: ServicesDep, _: Engineer) -> dict[str, Any]:
+    """Data the hub passes on: northbound MQTT targets, Modbus server, OPC UA server."""
+    opcua = svc.opcua_server
+    return {
+        "northbound": svc.northbound.describe() if svc.northbound is not None else [],
+        "modbus_server": svc.modbus_server.describe() if svc.modbus_server is not None else None,
+        "opcua_server": None if opcua is None else {
+            "enabled": opcua.server is not None, "endpoint": getattr(opcua, "endpoint", None),
+            "writes": dict(opcua.writes)},
+    }
 
 
 @router.get("/api/system/nodes")

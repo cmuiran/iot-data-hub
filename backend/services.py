@@ -34,6 +34,8 @@ class Services:
     opcua_server: Any = None
     role: str = "active"     # "standby" on the passive node of an HA pair
     security_watch: Any = None
+    northbound: Any = None      # backend.northbound.Northbound (config/northbound.yaml)
+    modbus_server: Any = None   # backend.modbus_server.HubModbusServer
 
     def __post_init__(self) -> None:
         from backend.config_admin import ConfigAdmin
@@ -54,6 +56,14 @@ class Services:
             from backend.opcua_server import HubOpcUaServer
 
             self.opcua_server = HubOpcUaServer(self)
+        if self.northbound is None:
+            from backend.northbound import Northbound
+
+            self.northbound = Northbound(self)
+        if self.modbus_server is None:
+            from backend.modbus_server import HubModbusServer
+
+            self.modbus_server = HubModbusServer(self)
         if self.maintenance is None:
             self.maintenance = Maintenance(self.store, self.settings.maintenance(),
                                            database_url=self.settings.database_url,
@@ -78,6 +88,10 @@ class Services:
             await self.scheduler.start()
         if self.opcua_server is not None:
             await self.opcua_server.start()
+        if self.northbound is not None:
+            await self.northbound.start()
+        if self.modbus_server is not None:
+            await self.modbus_server.start()
         if self.security_watch is not None:
             await self.security_watch.start()
         if self.maintenance is not None:
@@ -106,6 +120,23 @@ class Services:
                         [({"outcome": k}, v) for k, v in self.opcua_server.writes.items()]))
             out.append(("hub_opcua_server_login_failures_total", "counter",
                         "Refused OPC UA logins", [({}, self.opcua_server.users.failures)]))
+        if self.northbound is not None and self.northbound.publishers:
+            rows = self.northbound.describe()
+            out.append(("hub_northbound_published_total", "counter",
+                        "Messages published to northbound brokers",
+                        [({"target": r["name"]}, r["published"]) for r in rows]))
+            out.append(("hub_northbound_dropped_total", "counter",
+                        "Messages dropped because the northbound queue was full",
+                        [({"target": r["name"]}, r["dropped"]) for r in rows]))
+            out.append(("hub_northbound_queued", "gauge", "Messages waiting for the broker",
+                        [({"target": r["name"]}, r["queued"]) for r in rows]))
+            out.append(("hub_northbound_connected", "gauge", "1 while connected to the broker",
+                        [({"target": r["name"]}, 1 if r["connected"] else 0) for r in rows]))
+        if self.modbus_server is not None and self.modbus_server.server is not None:
+            out.append(("hub_modbus_server_events_total", "counter",
+                        "Modbus server requests, exceptions and writes",
+                        [({"event": k}, v) for k, v in sorted(
+                            self.modbus_server.counters.items())]))
         return out
 
     async def reload(self, report: ConfigReport) -> dict[str, list[str]]:
@@ -117,6 +148,10 @@ class Services:
             self.notifier.config = report.notifications
         if self.opcua_server is not None and self.opcua_server.server is not None:
             await self.opcua_server.restart()  # the address space follows the devices
+        if self.northbound is not None:
+            await self.northbound.reload()
+        if self.modbus_server is not None and self.role == "active":
+            await self.modbus_server.restart()
         return changes
 
     async def stop(self) -> None:
@@ -125,6 +160,10 @@ class Services:
             await self.security_watch.stop()
         if self.opcua_server is not None:
             await self.opcua_server.stop()
+        if self.modbus_server is not None:
+            await self.modbus_server.stop()
+        if self.northbound is not None:
+            await self.northbound.stop()
         if self.scheduler is not None:
             await self.scheduler.stop()
         if self.maintenance is not None:

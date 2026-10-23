@@ -25,19 +25,24 @@ from typing import Generic, TypeVar
 from hub.codec import Value, range_quality, to_engineering
 from hub.models import (
     Access,
+    HttpDevice,
     ModbusDevice,
     ModbusRtuDevice,
     MqttDevice,
     OpcUaDevice,
     Quality,
+    S7Device,
     Sample,
+    SnmpDevice,
     TagBase,
 )
 
 log = logging.getLogger(__name__)
 
-AnyDevice = ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice
-D = TypeVar("D", ModbusDevice, ModbusRtuDevice, MqttDevice, OpcUaDevice)
+AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
+             | SnmpDevice)
+D = TypeVar("D", ModbusDevice, ModbusRtuDevice, MqttDevice, OpcUaDevice, S7Device, HttpDevice,
+            SnmpDevice)
 
 
 class DeviceState(StrEnum):

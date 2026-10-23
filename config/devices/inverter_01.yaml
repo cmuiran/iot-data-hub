@@ -1,0 +1,50 @@
+# Rooftop solar inverter with a local JSON API (HTTP polling, read-only).
+#   GET /api/v1/status -> {"ac": {"power_kw": 12.4, "voltage": 231}, "state": 2, "ts": 1761200000}
+#   GET /api/v1/energy -> {"today_kwh": 54.2, "total_kwh": 18233}
+device_id: inverter_01
+name: Solar inverter
+site: kish
+area: solar_roof
+protocol: http
+enabled: true
+poll_interval_ms: 5000
+connection:
+  base_url: https://192.168.10.70
+  auth:
+    type: header
+    header: X-Api-Key
+    value_env: HUB_INVERTER01_API_KEY
+  ca_file_env: HUB_INVERTER01_CA_FILE
+  timeout_ms: 3000
+  timestamp_path: $.ts
+  timestamp_format: unix_s
+tags:
+  - name: ac_power
+    unit: kW
+    data_type: float32
+    path: /api/v1/status
+    json_path: $.ac.power_kw
+    min: 0
+    max: 30
+  - name: ac_voltage
+    unit: V
+    data_type: float32
+    path: /api/v1/status
+    json_path: $.ac.voltage
+    min: 180
+    max: 260
+  - name: state
+    data_type: uint16
+    path: /api/v1/status
+    json_path: $.state
+    states: {0: "off", 1: starting, 2: producing, 3: fault}
+  - name: energy_today
+    unit: kWh
+    data_type: float32
+    path: /api/v1/energy
+    json_path: $.today_kwh
+  - name: energy_total
+    unit: kWh
+    data_type: float64
+    path: /api/v1/energy
+    json_path: $.total_kwh

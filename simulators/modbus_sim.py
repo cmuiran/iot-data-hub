@@ -24,7 +24,7 @@ import math
 import struct
 from dataclasses import dataclass, field
 
-from hub.codec import Value, decode_bit, encode_registers, to_raw
+from hub.codec import Value, decode_bit, encode_bcd, encode_registers, to_raw
 from hub.models import DataType, ModbusDevice, ModbusTag, RegisterType
 
 log = logging.getLogger(__name__)
@@ -273,9 +273,17 @@ class SimulatedModbusDevice:
                 word = mem[tag.address] & ~(1 << tag.bit)
                 mem[tag.address] = word | ((1 if value else 0) << tag.bit)
             return
+        if tag.bit_count is not None and tag.bit is not None:
+            mask = ((1 << tag.bit_count) - 1) << tag.bit
+            field_value = (int(value) << tag.bit) & mask
+            mem[tag.address] = (mem[tag.address] & ~mask) | field_value
+            return
         raw = value if tag.data_type is DataType.STRING else to_raw(tag, value)
-        regs = encode_registers(raw, tag.data_type, conn.byte_order, conn.word_order,
-                                count=tag.count)
+        if tag.encoding == "bcd":
+            regs = encode_bcd(raw, tag.register_count, conn.word_order)
+        else:
+            regs = encode_registers(raw, tag.data_type, conn.byte_order, conn.word_order,
+                                    count=tag.count)
         for i, r in enumerate(regs):
             mem[tag.address + i] = r
 

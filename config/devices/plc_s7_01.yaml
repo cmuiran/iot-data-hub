@@ -1,0 +1,55 @@
+# Siemens S7-1200 of the water treatment skid, S7comm (PUT/GET allowed, DB1/DB2 not optimized).
+device_id: plc_s7_01
+name: Water treatment PLC
+site: kish
+area: water_treatment
+protocol: s7
+enabled: true
+description: S7-1214C, rack 0 slot 1. Values in DB1 (process), setpoints in DB2.
+poll_interval_ms: 1000
+connection:
+  host: 192.168.10.60
+  port: 102
+  rack: 0
+  slot: 1
+  timeout_ms: 2000
+tags:
+  - name: inlet_flow
+    unit: m3/h
+    data_type: float32
+    address: DB1.DBD0
+    min: 0
+    max: 120
+  - name: tank_level
+    unit: "%"
+    data_type: int16
+    address: DB1.DBW4
+    scale: 0.1
+    min: 0
+    max: 100
+  - name: pump_running
+    data_type: bool
+    address: DB1.DBX6.0
+  - name: filter_alarm
+    data_type: bool
+    address: DB1.DBX6.1
+  - name: operating_mode
+    data_type: uint16
+    address: DB1.DBB7
+    states: {0: stopped, 1: automatic, 2: manual, 3: backwash}
+  - name: run_hours
+    unit: h
+    data_type: uint32
+    address: DB1.DBD8
+  - name: chlorine_setpoint
+    description: Free chlorine target
+    unit: mg/l
+    data_type: float32
+    address: DB2.DBD0
+    access: read_write
+    min: 0.2
+    max: 2.0
+  - name: pump_enable
+    data_type: bool
+    address: DB2.DBX4.0
+    access: read_write

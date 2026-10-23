@@ -94,5 +94,88 @@
         "node_id": "ns=2;s=Pump.MotorSpeed"
       }
     ]
+  },
+  "s7": {
+    "device_id": "new_s7_plc_01",
+    "name": "New S7 PLC",
+    "site": "kish",
+    "area": "pump_station",
+    "protocol": "s7",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "host": "192.168.10.60",
+      "port": 102,
+      "rack": 0,
+      "slot": 1
+    },
+    "tags": [
+      {
+        "name": "flow",
+        "unit": "m3/h",
+        "data_type": "float32",
+        "address": "DB1.DBD0"
+      },
+      {
+        "name": "pump_running",
+        "data_type": "bool",
+        "address": "DB1.DBX4.0"
+      }
+    ]
+  },
+  "http": {
+    "device_id": "new_http_01",
+    "name": "New HTTP device",
+    "site": "kish",
+    "area": "solar_roof",
+    "protocol": "http",
+    "enabled": false,
+    "poll_interval_ms": 5000,
+    "connection": {
+      "base_url": "https://192.168.10.70",
+      "auth": {
+        "type": "bearer",
+        "token_env": "HUB_NEW_HTTP01_TOKEN"
+      }
+    },
+    "tags": [
+      {
+        "name": "power",
+        "unit": "kW",
+        "data_type": "float32",
+        "path": "/api/status",
+        "json_path": "$.power"
+      }
+    ]
+  },
+  "snmp": {
+    "device_id": "new_ups_01",
+    "name": "New SNMP device",
+    "site": "kish",
+    "area": "server_room",
+    "protocol": "snmp",
+    "enabled": false,
+    "poll_interval_ms": 10000,
+    "connection": {
+      "host": "192.168.10.80",
+      "security": {
+        "version": "3",
+        "username": "hubmon",
+        "auth_protocol": "sha256",
+        "auth_key_env": "HUB_NEW_UPS01_AUTH_KEY",
+        "priv_protocol": "aes128",
+        "priv_key_env": "HUB_NEW_UPS01_PRIV_KEY"
+      }
+    },
+    "tags": [
+      {
+        "name": "battery_charge",
+        "unit": "%",
+        "data_type": "uint16",
+        "oid": "1.3.6.1.2.1.33.1.2.4.0",
+        "min": 0,
+        "max": 100
+      }
+    ]
   }
 }

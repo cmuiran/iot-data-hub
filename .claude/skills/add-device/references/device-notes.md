@@ -4,7 +4,7 @@ What to check before onboarding common equipment. Source: `docs/device_catalog.x
 
 **This file never contains register addresses, NodeIds or IPs.** Those come only from the device's own datasheet, the PLC programmer, or a live browse/read. If a user asks you to "use the usual PM5560 registers", ask for the register list instead.
 
-Phase column = when the hub can talk to it: **1** direct (Modbus TCP / MQTT / OPC UA), **2** needs a simple gateway (RS-485 → TCP, LoRaWAN → MQTT), **3** needs a protocol gateway (S7comm, FINS, EtherNet/IP, …) — out of scope until such a gateway exists.
+Phase column = when the hub can talk to it: **1** direct (Modbus TCP/RTU, MQTT, OPC UA, S7comm, HTTP/REST JSON, SNMP), **2** needs a simple gateway (RS-485 → TCP, LoRaWAN → MQTT), **3** needs a protocol gateway (FINS, EtherNet/IP, BACnet, …) — out of scope until such a gateway exists.
 
 RS-485 / Modbus RTU devices marked "gateway" can also be read **directly** with `protocol: modbus_rtu` when the hub PC has a USB/RS-485 adapter (COM port) or an RFC 2217 serial server is on the line. Use the gateway route when the line is far from the hub or shared with other masters.
 
@@ -15,8 +15,8 @@ Contents: PLCs · Drives · Meters and analysers · I/O and gateways · IoT · S
 | Family | Hub input | Phase | Check before onboarding |
 |---|---|---|---|
 | Siemens S7-1500 | OPC UA | 1 | The OPC UA server must be enabled in TIA Portal (and licensed). Ask for the endpoint, the security policy actually configured, and an exported or browsed list of NodeIds — S7 NodeIds look like `ns=3;s="DB_Name"."Var"`; keep the quotes exactly as exported. |
-| Siemens S7-1200 | Modbus TCP | 1 | Modbus comes from the `MB_SERVER` block in the PLC program, so the register map is **whatever the PLC programmer mapped** (usually a DB or MW area). Ask the programmer for the map; there is no datasheet map. OPC UA only with suitable firmware and licence. |
-| Siemens S7-300 / S7-400 | via gateway (MQTT / OPC UA) | 3 | S7comm only; needs Node-RED, Neuron or Kepware. Register the gateway's output, named after the PLC. |
+| Siemens S7-1200 | S7comm (`s7`), or Modbus TCP | 1 | Prefer `s7`: needs PUT/GET enabled in the CPU and the DBs with "optimized block access" off; ask for the DB layout **with offsets** (visible only when optimization is off), rack 0 slot 1. Modbus TCP only if the programmer already mapped an `MB_SERVER` area. |
+| Siemens S7-300 / S7-400 | S7comm (`s7`) | 1 | Direct, no gateway: rack 0 slot 2 (S7-300; S7-400 see the hardware config). Ask for absolute addresses (DB number + byte offset, or M/I/Q). Through a CP 343-1 use the CP's IP address. |
 | Schneider Modicon M221 / M241 / M340 | Modbus TCP | 1 | Ethernet port required (M221: models with Ethernet). Map = %MW words defined in the program; ask the programmer. Schneider documentation often uses 0-based %MW numbers, not Modicon 4xxxx — check the base. |
 | Delta DVP / AS | Modbus TCP | 1 / 2 | Models without Ethernet need RS-485 + RTU→TCP gateway (see SKILL.md "Devices behind a gateway"). Delta manuals list device addresses (D, M, X, Y) with their Modbus hex equivalents — use the Modbus column. |
 | Mitsubishi FX5U / FX3U | Modbus TCP | 1 / 2 | FX5U has Modbus TCP built in (must be configured); FX3U usually needs an Ethernet module. |
@@ -67,6 +67,14 @@ Meters in general: decide units carefully (W vs kW, Wh vs kWh) and keep the unit
 | Shelly Pro / Plus | MQTT | 1 | Enable MQTT in the device settings; the topic prefix is set there. Get one real message from MQTT Explorer before mapping. |
 | Milesight UG65 + EM300-TH (LoRaWAN) | MQTT | 2 | The gateway's network server publishes decoded uplinks; payload shape depends on the decoder — always map from a captured message. Sensors buffer, so a device timestamp matters here. |
 | Generic RS-485 temperature/humidity sensor | Modbus TCP (gateway) | 2 | Brand unknown → no map → cannot be onboarded until the register list is found. |
+
+## Power, network and API devices
+
+| Family | Hub input | Phase | Check before onboarding |
+|---|---|---|---|
+| UPS (APC, Eaton, Riello, Socomec) with network card | SNMP (`snmp`) | 1 | Use the standard UPS-MIB (RFC 1628, `1.3.6.1.2.1.33...`) when the card supports it, else the vendor MIB (numeric OIDs). SNMPv3 `sha256`/`aes128` if the card allows it; v2c community only on an isolated network. Read-only. |
+| Managed switches, PDUs, environment monitors | SNMP (`snmp`) | 1 | Interface counters (IF-MIB `1.3.6.1.2.1.31.1.1.1.6.<ifIndex>` = octets in, 64-bit) are counters: report them with `delta`. Read-only. |
+| Inverters, EV chargers, smart gateways with a local API | HTTP/REST (`http`) | 1 | Ask for the API document or a sample response; prefer HTTPS with the plant CA; API keys go into env vars. If the device also speaks Modbus TCP (SunSpec) or MQTT, those can be writable — HTTP is read-only in the hub. |
 
 ## SCADA
 

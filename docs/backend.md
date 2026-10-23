@@ -7,12 +7,16 @@ One process (`hub-api`) runs everything:
 ```
  field devices                     hub-api process
  ─────────────                     ───────────────────────────────────────────────────────
- Modbus TCP ──► ModbusTcpDriver ─┐
- MQTT/JSON  ──► MqttJsonDriver  ─┼─► Hub ─┬─► latest cache ──────────► REST /api/... (FastAPI)
- OPC UA     ──► OpcUaDriver     ─┘        ├─► LiveBus ────────────────► WebSocket /api/ws
-                  ▲                       ├─► AlarmEngine ──► alarm_events
-                  │ WriteGrant            └─► batched writer ──► PostgreSQL (+TimescaleDB)
-                  └──────────── ControlService (backend/control.py) ◄── POST /api/control/write
+ Modbus TCP/RTU ► ModbusTcpDriver ┐                  ┌─► REST /api/... + dashboard (/)
+ MQTT/JSON  ──► MqttJsonDriver    ├─► Hub ─┬─► latest ┼─► Modbus TCP server (modbus_server.yaml)
+ OPC UA     ──► OpcUaDriver       │        │   cache   └─► OPC UA server (HUB_OPCUA_SERVER)
+ Siemens S7 ──► S7Driver          │        ├─► LiveBus ──► WebSocket /api/ws
+ HTTP/REST  ──► HttpJsonDriver    │        │          └──► northbound MQTT (northbound.yaml)
+ SNMP       ──► SnmpDriver       ─┘        ├─► AlarmEngine ──► alarm_events
+                  ▲                        └─► batched writer ──► PostgreSQL (+TimescaleDB)
+                  │ WriteGrant
+                  └── ControlService (backend/control.py) ◄── dashboard, schedules,
+                                                              OPC UA / Modbus server writes
 ```
 
 * **Drivers** (`hub/drivers/`) own one device each, reconnect with exponential backoff and never
@@ -109,6 +113,7 @@ translation). Interactive docs: `/api/docs` (OpenAPI at `/api/openapi.json`).
 | GET | /api/audit/writes | audit.read | `tag`, `user_id`, `request_id`, `since`, `limit` |
 | GET | /api/audit/auth | audit.read | `event`, `limit` |
 | GET | /api/system/info | signed in | version, node, HA role, time zone, control on/off, idle minutes, password length (for the dashboard) |
+| GET | /api/system/outputs | config.edit | northbound MQTT targets (connected, published, queued, dropped), Modbus server and OPC UA server status |
 | GET | /api/system/stats | config.edit | samples received/written/buffered/dropped, device states |
 | GET | /api/system/config | config.edit | the running configuration (secrets are env var names) |
 | GET | /api/system/events, /api/system/nodes | config.edit | backups, retention, failovers; HA nodes |
@@ -151,7 +156,7 @@ goes in the URL). The server answers `snapshot` (tags, devices, active alarms) a
 
 ```
 .venv\Scripts\hub-sim.exe --config-dir config --out .sim
-.venv\Scripts\hub-api.exe --config-dir .sim/config --dev --embedded-db .sim/db
+.venv\Scripts\hub-api.exe --config-dir .sim/config --env-file .sim/sim.env --dev --embedded-db .sim/db
 .venv\Scripts\hub-admin.exe --embedded-db .sim/db create-admin --username boss
 ```
 
@@ -320,3 +325,73 @@ network (VLAN + firewall) that only the hub can reach. A database superuser can 
 whole audit chain; the daily anchors in `system_events` and the log file are what reveal it, so
 ship the log file to a separate machine.
 
+## 16. More field protocols (phase 3)
+
+| Protocol | Driver | Typical devices | Writes |
+|---|---|---|---|
+| `s7` | `hub/drivers/s7.py` (python-snap7, asyncio) | S7-300/400, S7-1200/1500 without OPC UA | yes, via the safety layer |
+| `http` | `hub/drivers/http_json.py` (httpx) | inverters, gateways, weather stations, IoT devices with a JSON API | no |
+| `snmp` | `hub/drivers/snmp.py` (pysnmp, v2c / v3) | UPS, PDUs, switches, environment monitors | no |
+
+**Siemens S7.** Absolute addresses (`DB1.DBD0`, `DB1.DBX6.2`, `MW20`, `IW64`, `Q0.0`; `E`/`A`
+accepted). Values are grouped into byte blocks per DB/area, so a DB with 50 values is one
+request; an address the PLC refuses is read tag by tag from then on. A bool is written with the
+protocol's single-bit transport, so the other bits of that byte (which the PLC program may be
+changing) are never overwritten. In the PLC: allow PUT/GET (S7-1200/1500: Protection & Security
+→ Connection mechanisms) and switch off "optimized block access" for the DBs the hub reads;
+S7-300 is usually rack 0 slot 2, S7-1200/1500 rack 0 slot 1.
+
+**HTTP/REST.** `base_url` + per-tag `path` and `json_path`; each distinct path is requested once
+per poll. Authentication from env vars (basic, bearer, API-key header); TLS verified against the
+system CAs or `ca_file_env`. Network errors → offline; HTTP error status or non-JSON → that
+path's values bad, state `error`.
+
+**SNMP.** Numeric OIDs (no MIB files on the hub). SNMPv3 with `sha256` + `aes128` is the
+recommended setting; v2c sends the community in clear text (the validator warns). A wrong
+community gives no answer (offline), a wrong v3 key fails the digest check (offline with that
+message), a missing OID marks only that tag bad.
+
+**Value labels (all protocols).** `states: {0: stopped, 1: running}` on an integer or bool tag:
+the dashboard shows the label, history and reports keep the number.
+
+**Modbus extras.** `bit` + `bit_count` reads a field of several bits (a mode in bits 4–6) as a
+read-only integer; `encoding: bcd` reads/writes packed decimal digits (older meters and drives).
+A register that cannot be decoded (not BCD) makes only that tag bad; the device stays online.
+
+## 17. MQTT over TLS
+
+`brokers.yaml`: `tls: true` always verifies the broker certificate and host name (TLS 1.2+),
+against the system CAs or the plant CA in `ca_file_env`. `client_certificate_env` +
+`client_private_key_env` add a client certificate (mutual TLS, required by hardened brokers);
+`tls_server_name` when the certificate name differs from `host` (e.g. connecting by IP). The
+`*_env` variables hold file **paths**; certificates and keys stay out of the config. Used by the
+MQTT driver and the northbound publisher.
+
+## 18. Northbound MQTT (publish to another broker)
+
+`config/northbound.yaml` (example: `northbound.example.yaml`): per target a broker from
+`brokers.yaml`, a `topic_prefix` and tag patterns. Messages `<prefix>/<site>/<area>/<device>/<tag>`
+→ `{"v", "ts", "q", "u"}` on change (value or quality) and every `heartbeat_s`, at most one per
+`min_interval_s`; `<prefix>/status` (retained) `online` / `offline` (on a clean stop, and from the
+broker as last will when the hub disappears). While the broker is unreachable messages queue
+(`queue_max`, oldest dropped and counted) and are sent in order afterwards. Only the active HA
+node publishes. Output only: nothing received there reaches a device. Status:
+`GET /api/system/outputs`, System page, metrics `hub_northbound_*`.
+
+## 19. Modbus TCP server (for SCADA / HMI / PLCs)
+
+`config/modbus_server.yaml` (example: `modbus_server.example.yaml`) maps tags to input/holding
+registers, coils and discrete inputs (`data_type` and `scale` per point; `source: quality` puts
+the quality code 0/1/2 in a register). Registers are encoded from the latest values on every
+request. Modbus has no authentication, so:
+
+* readers can be limited with `allowed_clients` (the validator warns when the server listens on
+  the network without it);
+* writes need `writable: true` points **and** a `writes` section: only `writes.allowed_clients`
+  may write, a multi-register value is written whole, and every write goes through
+  `ControlService.request_write` as the hub user `writes.as_user` (give it the operator role for
+  the area, nothing more). Answers: applied → normal response; waiting for a second person →
+  exception 05; refused → exception 04; not writable → exception 02; client not allowed →
+  exception 01.
+
+Status: `GET /api/system/outputs`, System page, metric `hub_modbus_server_events_total`.

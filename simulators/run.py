@@ -3,11 +3,13 @@
     hub-sim --config-dir config --out .sim
 
 Writes ``.sim/config``: a copy of the configuration pointing at local simulators (Modbus TCP
-servers on 127.0.0.1:15020+, an embedded MQTT broker, OPC UA servers on 127.0.0.1:14840+;
-security and credentials removed), then runs the simulators until Ctrl+C. Start the hub
-against the copy in another terminal, e.g.::
+servers on 127.0.0.1:15020+, an embedded MQTT broker, OPC UA servers on 127.0.0.1:14840+, S7
+PLCs on 127.0.0.1:15102+, one HTTP server, SNMP agents on 127.0.0.1:16161+; security and
+credentials removed, except SNMP, which needs a community: it is written to
+``.sim/sim.env``), then runs the simulators until Ctrl+C. Start the hub against the copy in
+another terminal, e.g.::
 
-    hub-api --config-dir .sim/config --dev --embedded-db .sim/db
+    hub-api --config-dir .sim/config --env-file .sim/sim.env --dev --embedded-db .sim/db
 
 The original config is never modified.
 """
@@ -25,13 +27,33 @@ from typing import Any
 
 import yaml
 
-from hub.config_loader import ALARMS_FILE, CONTROL_FILE, load_config
-from hub.models import AlarmRule, ModbusDevice, ModbusRtuDevice, MqttDevice, OpcUaDevice
+from hub.config_loader import (
+    ALARMS_FILE,
+    CONTROL_FILE,
+    MODBUS_SERVER_FILE,
+    NORTHBOUND_FILE,
+    load_config,
+)
+from hub.models import (
+    AlarmRule,
+    HttpDevice,
+    ModbusDevice,
+    ModbusRtuDevice,
+    MqttDevice,
+    OpcUaDevice,
+    S7Device,
+    SnmpDevice,
+)
 from hub.runtime import run
 from hub.validate_config import print_report
 from simulators.modbus_sim import ModbusSimServer, SimulatedModbusDevice
 from simulators.mqtt_sim import EmbeddedBroker, SimulatedMqttDevice
+from simulators.http_sim import HttpSimServer, SimulatedHttpDevice
 from simulators.opcua_sim import SimulatedOpcUaServer
+from simulators.s7_sim import S7SimServer, SimulatedS7Device
+from simulators.snmp_sim import SimulatedSnmpDevice, SnmpSimAgent
+
+SIM_COMMUNITY_ENV = "HUB_SIM_SNMP_COMMUNITY"
 
 log = logging.getLogger("hub.sim")
 
@@ -68,7 +90,8 @@ def _safe_bools(rules: dict[str, AlarmRule], device: Any) -> dict[str, bool]:
 
 
 async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
-                opcua_base: int) -> int:
+                opcua_base: int, s7_base: int = 15102, http_port: int = 18080,
+                snmp_base: int = 16161) -> int:
     report = load_config(config_dir, env={})
     if report.has_errors:
         print_report(report, sys.stderr)
@@ -77,7 +100,7 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
     if sim_config.exists():
         shutil.rmtree(sim_config)
     (sim_config / "devices").mkdir(parents=True)
-    for name in (ALARMS_FILE, CONTROL_FILE):
+    for name in (ALARMS_FILE, CONTROL_FILE, NORTHBOUND_FILE, MODBUS_SERVER_FILE):
         if (config_dir / name).exists():
             shutil.copy(config_dir / name, sim_config / name)
 
@@ -87,6 +110,12 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
     opcua_groups: dict[str, list[OpcUaDevice]] = {}
     broker = EmbeddedBroker(mqtt_port)
     files: dict[str, dict[str, Any]] = {}
+    s7_servers: dict[tuple[str, int], S7SimServer] = {}
+    s7_devices: list[S7Device] = []
+    http_server = HttpSimServer(http_port)
+    http_devices: list[HttpDevice] = []
+    snmp_agents: dict[str, SnmpSimAgent] = {}
+    community = "hubsim"
 
     for loaded in report.devices:
         d = loaded.device
@@ -113,6 +142,23 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
             mqtt_devices.append(d)
         elif isinstance(d, OpcUaDevice):
             opcua_groups.setdefault(d.connection.endpoint_url, []).append(d)
+        elif isinstance(d, S7Device):
+            key = (d.connection.host.lower(), d.connection.port)
+            if key not in s7_servers:
+                s7_servers[key] = S7SimServer(s7_base + len(s7_servers))
+            data["connection"].update(host="127.0.0.1", port=s7_servers[key].port)
+            s7_devices.append(d)
+        elif isinstance(d, HttpDevice):
+            data["connection"].update(base_url=http_server.base_url(d.device_id),
+                                      auth={"type": "none"}, verify_tls=True)
+            data["connection"].pop("ca_file_env", None)
+            http_devices.append(d)
+        elif isinstance(d, SnmpDevice):
+            agent = snmp_agents.setdefault(d.device_id, SnmpSimAgent(snmp_base + len(snmp_agents)))
+            agent.add_community(community)
+            data["connection"].update(host="127.0.0.1", port=agent.port,
+                                      security={"version": "2c",
+                                                "community_env": SIM_COMMUNITY_ENV})
         files[d.device_id] = data
 
     opcua_servers = []
@@ -132,6 +178,8 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
             yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
     brokers = [{"broker_id": b, "host": "127.0.0.1", "port": broker.port}
                for b in report.brokers]
+    (out / "sim.env").write_text(f"# written by hub-sim: credentials of the simulators only\n"
+                                 f"{SIM_COMMUNITY_ENV}={community}\n", encoding="utf-8")
     (sim_config / "brokers.yaml").write_text(yaml.safe_dump({"brokers": brokers}), "utf-8")
 
     check = load_config(sim_config, env={})
@@ -142,6 +190,24 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
     rules = {r.tag: r for r in report.alarms.rules}
     for server in modbus_servers.values():
         await server.start()
+    s7_sims = []
+    sim_by_id = {loaded.device.device_id: loaded.device for loaded in check.devices}
+    for d in s7_devices:
+        server = s7_servers[(d.connection.host.lower(), d.connection.port)]
+        sim7 = SimulatedS7Device(server, _normal(sim_by_id[d.device_id], rules))
+        for name, value in _safe_bools(rules, d).items():
+            sim7.set(name, value)
+        s7_sims.append(sim7)
+    for server7 in s7_servers.values():
+        server7.start()
+    http_sims = [http_server.add(SimulatedHttpDevice(_normal(sim_by_id[d.device_id], rules)))
+                 for d in http_devices]
+    if http_devices:
+        await http_server.start()
+    snmp_sims = []
+    for device_id, agent in snmp_agents.items():
+        snmp_sims.append(SimulatedSnmpDevice(agent, _normal(sim_by_id[device_id], rules)))
+        agent.start()
     for loaded in check.devices:
         if isinstance(loaded.device, ModbusDevice | ModbusRtuDevice):
             c = loaded.device.connection
@@ -153,7 +219,7 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
                 sim_dev.set(name, value)
             sim_dev.step(0)
             modbus_devices.append(sim_dev)
-    if mqtt_devices:
+    if mqtt_devices or report.northbound.targets:   # northbound publishes to it too
         await broker.start()
     mqtt_sims = []
     for d in mqtt_devices:
@@ -173,11 +239,16 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
 
     lines = [f"simulating {len(files)} device(s); config for the hub: {sim_config}",
              f"  Modbus TCP: {', '.join(f'127.0.0.1:{s.port}' for s in modbus_servers.values())}"]
-    if mqtt_devices:
+    if mqtt_devices or report.northbound.targets:
         lines.append(f"  MQTT broker: 127.0.0.1:{broker.port}")
     lines += [f"  OPC UA: {sim.endpoint}" for sim in opcua_servers]
-    lines.append(f"start the hub:  hub-api --config-dir {sim_config} --dev "
-                 f"--embedded-db {out / 'db'}")
+    lines += [f"  S7 PLC: 127.0.0.1:{s.port}" for s in s7_servers.values()]
+    if http_devices:
+        lines.append(f"  HTTP: http://127.0.0.1:{http_server.port}/<device_id>")
+    lines += [f"  SNMP ({device_id}): 127.0.0.1:{a.port}/udp"
+              for device_id, a in snmp_agents.items()]
+    lines.append(f"start the hub:  hub-api --config-dir {sim_config} --env-file "
+                 f"{out / 'sim.env'} --dev --embedded-db {out / 'db'}")
     print("\n".join(lines), flush=True)
     try:
         while True:
@@ -189,7 +260,14 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
                 await q.publish()
             for o in opcua_servers:
                 await o.step()
+            for sim in [*s7_sims, *http_sims, *snmp_sims]:
+                sim.step()
     finally:
+        for server7 in s7_servers.values():
+            server7.stop()
+        for agent in snmp_agents.values():
+            agent.stop()
+        await http_server.stop()
         for q in mqtt_sims:
             await q.disconnect()
         await broker.stop()
@@ -206,11 +284,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--modbus-port", type=int, default=15020)
     parser.add_argument("--mqtt-port", type=int, default=11883)
     parser.add_argument("--opcua-port", type=int, default=14840)
+    parser.add_argument("--s7-port", type=int, default=15102)
+    parser.add_argument("--http-port", type=int, default=18080)
+    parser.add_argument("--snmp-port", type=int, default=16161)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     with contextlib.suppress(KeyboardInterrupt):
         return run(_main(args.config_dir, args.out, args.modbus_port, args.mqtt_port,
-                         args.opcua_port))
+                         args.opcua_port, args.s7_port, args.http_port, args.snmp_port))
     return 0
 
 

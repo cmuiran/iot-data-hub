@@ -25,6 +25,7 @@ import logging
 import os
 import ssl
 from datetime import datetime
+from typing import Any
 
 import aiomqtt
 
@@ -60,6 +61,47 @@ def extract(payload: object, path: str) -> object:
                 return _MISSING
             node = node[part]
     return node
+
+
+class _NamedTlsContext(ssl.SSLContext):
+    """Checks the broker certificate against ``server_name`` instead of the connect host."""
+
+    server_name: str | None = None
+
+    def wrap_socket(self, sock: Any, *args: Any, server_hostname: str | None = None,
+                    **kwargs: Any) -> ssl.SSLSocket:
+        return super().wrap_socket(sock, *args, server_hostname=self.server_name
+                                   or server_hostname, **kwargs)
+
+
+def _env_path(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise DriverError(f"environment variable {name} is not set (path of a TLS file)")
+    if not os.path.isfile(value):
+        raise DriverError(f"{name} points to {value!r}, which is not a file")
+    return value
+
+
+def broker_tls_context(broker: Broker) -> ssl.SSLContext:
+    """TLS for a broker: certificate and host name always verified (TLS 1.2+), against the
+    system CAs or ``ca_file_env``; client certificate for mutual TLS when configured."""
+    ctx = _NamedTlsContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    if broker.ca_file_env:
+        ctx.load_verify_locations(cafile=_env_path(broker.ca_file_env))
+    else:
+        ctx.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    if broker.client_certificate_env and broker.client_private_key_env:
+        try:
+            ctx.load_cert_chain(_env_path(broker.client_certificate_env),
+                                _env_path(broker.client_private_key_env))
+        except ssl.SSLError as exc:
+            raise DriverError(f"client certificate/key for broker {broker.broker_id}: {exc}")                 from exc
+    ctx.server_name = broker.tls_server_name
+    return ctx
 
 
 def topic_matches(topic_filter: str, topic: str) -> bool:
@@ -114,7 +156,7 @@ class MqttJsonDriver(Driver[MqttDevice]):
             kwargs["username"] = os.environ.get(b.username_env)
             kwargs["password"] = os.environ.get(b.password_env) if b.password_env else None
         if b.tls:
-            kwargs["tls_context"] = ssl.create_default_context()
+            kwargs["tls_context"] = broker_tls_context(b)
         return kwargs
 
     async def _connect(self) -> None:

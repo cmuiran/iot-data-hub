@@ -15,7 +15,16 @@ from hub.drivers.base import (
     WriteNotPermitted,
     utcnow,
 )
-from hub.models import Broker, ModbusDevice, ModbusRtuDevice, MqttDevice, OpcUaDevice
+from hub.models import (
+    Broker,
+    HttpDevice,
+    ModbusDevice,
+    ModbusRtuDevice,
+    MqttDevice,
+    OpcUaDevice,
+    S7Device,
+    SnmpDevice,
+)
 
 
 def create_driver(
@@ -41,6 +50,18 @@ def create_driver(
         from hub.drivers.opcua import OpcUaDriver
 
         return OpcUaDriver(device, on_samples, on_status, clock=clock)
+    if isinstance(device, S7Device):
+        from hub.drivers.s7 import S7Driver
+
+        return S7Driver(device, on_samples, on_status, clock=clock)  # type: ignore[arg-type]
+    if isinstance(device, HttpDevice):
+        from hub.drivers.http_json import HttpJsonDriver
+
+        return HttpJsonDriver(device, on_samples, on_status, clock=clock)
+    if isinstance(device, SnmpDevice):
+        from hub.drivers.snmp import SnmpDriver
+
+        return SnmpDriver(device, on_samples, on_status, clock=clock)
     raise DriverError(f"no driver for protocol {device.protocol!r}")
 
 

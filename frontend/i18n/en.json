@@ -102,7 +102,10 @@
   "modbus_tcp": "Modbus TCP",
   "modbus_rtu": "Modbus RTU",
   "mqtt": "MQTT / JSON",
-  "opcua": "OPC UA"
+  "opcua": "OPC UA",
+  "s7": "Siemens S7",
+  "http": "HTTP / REST",
+  "snmp": "SNMP"
  },
  "roles": {
   "admin": "Administrator",
@@ -185,7 +188,10 @@
  "areas": {
   "warehouse": "Warehouse",
   "substation": "Substation",
-  "pump_station": "Pump station"
+  "pump_station": "Pump station",
+  "water_treatment": "Water treatment",
+  "solar_roof": "Solar roof",
+  "server_room": "Server room"
  },
  "tag_names": {
   "temperature": "Temperature",
@@ -898,7 +904,26 @@
   "result": "Result",
   "detail": "Detail",
   "config_issues": "Configuration check",
-  "config_clean": "No problems found"
+  "config_clean": "No problems found",
+  "outputs": "Outputs to other systems",
+  "northbound": "Northbound MQTT",
+  "target": "Target",
+  "state": "State",
+  "connected": "Connected",
+  "disconnected": "Disconnected",
+  "published": "Published",
+  "queued": "Waiting",
+  "dropped": "Dropped",
+  "no_northbound": "Not configured (config/northbound.yaml)",
+  "modbus_server": "Modbus TCP server",
+  "address": "Address",
+  "points": "Points",
+  "writes": "Writes",
+  "writes_on": "allowed for listed clients, through the safety layer",
+  "writes_off": "read-only",
+  "clients": "Connected clients",
+  "requests": "Counters",
+  "no_modbus_server": "Not configured (config/modbus_server.yaml)"
  },
  "account": {
   "title": "My account",
