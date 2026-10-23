@@ -108,6 +108,7 @@ translation). Interactive docs: `/api/docs` (OpenAPI at `/api/openapi.json`).
 | GET | /api/roles | user.manage | roles and their permissions |
 | GET | /api/audit/writes | audit.read | `tag`, `user_id`, `request_id`, `since`, `limit` |
 | GET | /api/audit/auth | audit.read | `event`, `limit` |
+| GET | /api/system/info | signed in | version, node, HA role, time zone, control on/off, idle minutes, password length (for the dashboard) |
 | GET | /api/system/stats | config.edit | samples received/written/buffered/dropped, device states |
 | GET | /api/system/config | config.edit | the running configuration (secrets are env var names) |
 | GET | /api/system/events, /api/system/nodes | config.edit | backups, retention, failovers; HA nodes |

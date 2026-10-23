@@ -102,8 +102,15 @@ async def test_one_active_one_standby_then_failover(pair: tuple[Node, Node, Any]
     await wait(lambda: b.services.hub.statuses["meter_02"].state is DeviceState.ONLINE)
     assert (await b.client.get("/api/health")).status_code == 200
 
-    nodes = {n["node_id"]: n["role"] for n in await b.store.nodes()}
-    assert nodes == {"node_a": "stopped", "node_b": "active"}
+    # the role row is written when the takeover has finished starting everything
+    async def roles() -> dict[str, str]:
+        return {n["node_id"]: n["role"] for n in await b.store.nodes()}
+
+    for _ in range(100):
+        if (await roles()).get("node_b") == "active":
+            break
+        await asyncio.sleep(0.1)
+    assert await roles() == {"node_a": "stopped", "node_b": "active"}
     kinds = [(e["node_id"], e["detail"]["role"]) for e in await b.store.events("failover", 10)]
     assert ("node_b", "active") in kinds and ("node_a", "active") in kinds
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import (
@@ -34,8 +36,18 @@ _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-store",
 }
+
+# The dashboard: only its own files, no inline script or style, live data over this host's WebSocket
+_UI_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+           "connect-src 'self' {ws}; font-src 'self'; object-src 'none'; base-uri 'none'; "
+           "form-action 'self'; frame-ancestors 'none'")
+
+
+def _ui_csp(request: Request) -> str:
+    host = request.headers.get("host", "")
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    return _UI_CSP.format(ws=f"{scheme}://{host}" if host else "")
 
 
 def create_app(services: Services) -> FastAPI:
@@ -76,7 +88,12 @@ def create_app(services: Services) -> FastAPI:
             response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
-        if not path.startswith("/api/docs"):  # Swagger UI needs its scripts
+        ui = not guarded and not path.startswith("/api/")
+        # API answers are never cached; dashboard files are revalidated (ETag) on every load
+        response.headers.setdefault("Cache-Control", "no-cache" if ui else "no-store")
+        if ui:
+            response.headers.setdefault("Content-Security-Policy", _ui_csp(request))
+        elif not path.startswith("/api/docs"):  # Swagger UI needs its scripts
             response.headers.setdefault("Content-Security-Policy",
                                         "default-src 'none'; frame-ancestors 'none'")
         if services.settings.tls:
@@ -112,4 +129,15 @@ def create_app(services: Services) -> FastAPI:
     for module in (auth, users, data, control, config, dashboards, reports, schedules, system,
                    metrics, ws):
         app.include_router(module.router)
+    _mount_frontend(app, services.settings.frontend_dir)
     return app
+
+
+def _mount_frontend(app: FastAPI, directory: Path | None) -> None:
+    """Serve the dashboard at / (hash routing, so no server-side fallback is needed)."""
+    if directory is None:
+        return
+    if not (directory / "index.html").is_file():
+        log.warning("HUB_FRONTEND_DIR %s has no index.html; serving the API only", directory)
+        return
+    app.mount("/", StaticFiles(directory=directory, html=True), name="frontend")

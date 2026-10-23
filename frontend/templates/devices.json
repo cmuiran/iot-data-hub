@@ -1,0 +1,98 @@
+{
+  "modbus_tcp": {
+    "device_id": "new_meter_01",
+    "name": "New Modbus meter",
+    "site": "kish",
+    "area": "substation",
+    "protocol": "modbus_tcp",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "host": "192.168.10.30",
+      "port": 502,
+      "unit_id": 1,
+      "timeout_ms": 1000,
+      "retries": 3,
+      "byte_order": "big",
+      "word_order": "big"
+    },
+    "tags": [
+      {
+        "name": "voltage_l1",
+        "unit": "V",
+        "data_type": "float32",
+        "register_type": "input",
+        "address": 0
+      }
+    ]
+  },
+  "modbus_rtu": {
+    "device_id": "new_rtu_01",
+    "name": "New Modbus RTU device",
+    "site": "kish",
+    "area": "substation",
+    "protocol": "modbus_rtu",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "port": "COM3",
+      "baudrate": 9600,
+      "parity": "N",
+      "stopbits": 1,
+      "unit_id": 1
+    },
+    "tags": [
+      {
+        "name": "temperature",
+        "unit": "degC",
+        "data_type": "int16",
+        "register_type": "holding",
+        "address": 0,
+        "scale": 0.1
+      }
+    ]
+  },
+  "mqtt": {
+    "device_id": "new_sensor_01",
+    "name": "New MQTT sensor",
+    "site": "kish",
+    "area": "warehouse",
+    "protocol": "mqtt",
+    "enabled": false,
+    "connection": {
+      "broker_ref": "plant_broker",
+      "telemetry_topic": "kish/warehouse/new_sensor_01/telemetry",
+      "payload_format": "json",
+      "qos": 1
+    },
+    "tags": [
+      {
+        "name": "temperature",
+        "unit": "degC",
+        "data_type": "float32",
+        "json_path": "$.temp"
+      }
+    ]
+  },
+  "opcua": {
+    "device_id": "new_plc_01",
+    "name": "New OPC UA PLC",
+    "site": "kish",
+    "area": "pump_station",
+    "protocol": "opcua",
+    "enabled": false,
+    "connection": {
+      "endpoint_url": "opc.tcp://192.168.10.50:4840",
+      "security_policy": "None",
+      "security_mode": "None"
+    },
+    "tags": [
+      {
+        "name": "motor_speed",
+        "unit": "rpm",
+        "data_type": "float32",
+        "node_id": "ns=2;s=Pump.MotorSpeed"
+      }
+    ]
+  }
+}

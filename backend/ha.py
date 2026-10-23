@@ -114,11 +114,14 @@ class HaCoordinator:
                 await conn.close()
 
     async def _promote(self) -> None:
+        # holding the lock makes this node the active one: record that first, so the role row
+        # and the failover event exist even if starting the services is slow or interrupted
         log.warning("HA: node %s becomes ACTIVE", self.node_id)
-        await self.services.start()
+        self.services.role = "active"
         self.transitions.append("active")
         await self._heartbeat()
         await self._event("active")
+        await self.services.start()
 
     async def _demote(self, reason: str) -> None:
         log.error("HA: node %s goes to STANDBY (%s): stopping all device traffic",

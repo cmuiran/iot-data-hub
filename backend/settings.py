@@ -14,6 +14,16 @@ from pydantic import BaseModel, Field, field_validator
 from hub.maintenance import MaintenanceSettings
 
 
+BUNDLED_FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+
+
+def _frontend_dir(value: str | None) -> Path | None:
+    """HUB_FRONTEND_DIR: unset = the bundled dashboard, "off" = API only, else a directory."""
+    if value is None or value == "":
+        return BUNDLED_FRONTEND if (BUNDLED_FRONTEND / "index.html").is_file() else None
+    return None if value.strip().lower() == "off" else Path(value)
+
+
 def _list(value: str | None) -> list[str]:
     return [v.strip() for v in (value or "").split(",") if v.strip()]
 
@@ -76,6 +86,8 @@ class Settings(BaseModel):
     allowed_networks: list[str] = Field(default_factory=list)       # empty = any address
     allowed_origins: list[str] = Field(default_factory=list)        # browsers for /api/ws
     cert_warn_days: int = Field(default=30, ge=1, le=365)
+    # web dashboard (frontend/), served at / by hub-api
+    frontend_dir: Path | None = Field(default_factory=lambda: _frontend_dir(None))
 
     @field_validator("allowed_networks")
     @classmethod
@@ -185,6 +197,7 @@ class Settings(BaseModel):
             allowed_networks=_list(e.get("HUB_ALLOWED_NETWORKS")),
             allowed_origins=_list(e.get("HUB_ALLOWED_ORIGINS")),
             cert_warn_days=int(e.get("HUB_CERT_WARN_DAYS", 30)),
+            frontend_dir=_frontend_dir(e.get("HUB_FRONTEND_DIR")),
         )
 
 

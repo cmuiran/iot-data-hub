@@ -2,9 +2,9 @@
 
 Collects data from field devices over **Modbus TCP**, **MQTT/JSON** and **OPC UA**, normalizes it
 into one data model, stores history in PostgreSQL (+ TimescaleDB), raises alarms, and serves a
-REST + WebSocket API with user management, RBAC and a control-safety layer for writes.
-Project rules: [CLAUDE.md](CLAUDE.md). Backend details, API reference and operations:
-[docs/backend.md](docs/backend.md).
+REST + WebSocket API with user management, RBAC and a control-safety layer for writes, and a
+Persian/English web dashboard. Project rules: [CLAUDE.md](CLAUDE.md). Backend details, API
+reference and operations: [docs/backend.md](docs/backend.md); dashboard: [docs/frontend.md](docs/frontend.md).
 
 ## Status
 
@@ -19,7 +19,7 @@ Project rules: [CLAUDE.md](CLAUDE.md). Backend details, API reference and operat
 | Integration | OPC UA server for SCADA (encrypted, writes via the safety layer), Prometheus metrics | done |
 | Operations | Windows service (WinSW), rotating logs with redaction, active/standby HA | done |
 | Security hardening | HTTPS, MFA (TOTP), idle timeout, password history/expiry, network allowlist, rate limit, WebSocket origin check, encrypted backups, tamper-evident audit, certificate expiry alarms | done |
-| Web dashboard (fa/en, RTL) | | **not started** |
+| Web dashboard (fa/en, RTL) | live overview, devices, alarms (horn, notifications), trends, reports, control with two-person confirmation, schedules, dashboard builder, users, configuration, audit, system; Jalali calendar; light/dark; phone layout | done |
 
 Not verified yet: real field hardware, TimescaleDB-specific parts (tests skip without it), the
 Windows service installation itself (needs an elevated shell and WinSW), real SMTP/Telegram/SMS
@@ -41,7 +41,7 @@ Run the whole system against simulated devices (two terminals):
 .venv\Scripts\hub-api.exe --config-dir .sim/config --dev --embedded-db .sim/db
 ```
 
-Then open http://127.0.0.1:8000/api/docs, log in with `POST /api/auth/login` and use the token.
+Then open http://127.0.0.1:8000/ and sign in (the API itself: http://127.0.0.1:8000/api/docs).
 
 ## Commands
 
@@ -59,11 +59,12 @@ Then open http://127.0.0.1:8000/api/docs, log in with `POST /api/auth/login` and
 config/          brokers.yaml, devices/*.yaml, alarms.yaml, control.yaml, notifications.yaml
 hub/             models, config loader, codec, drivers, alarm engine, runtime, storage
 backend/         FastAPI app, auth, RBAC, control-safety layer, server/admin CLIs
+frontend/        web dashboard (served by hub-api at /): index.html, css/, js/, i18n/fa.json + en.json
 simulators/      Modbus TCP server, MQTT broker + devices, OPC UA server, hub-sim
 db/migrations/   0001_core, 0002_timescale (optional), 0003_operations, 0004_security
 scripts/windows/ install-service.ps1 / uninstall-service.ps1 (WinSW)
-docs/            backend.md, device_catalog.xlsx
-tests/           unit, drivers, storage, api, e2e (470+ tests, no hardware needed)
+docs/            backend.md, frontend.md, device_catalog.xlsx
+tests/           unit, drivers, storage, api, e2e, frontend (530+ tests, no hardware needed)
 .claude/skills/  add-device: onboard devices from datasheets, payloads, Excel
 ```
 

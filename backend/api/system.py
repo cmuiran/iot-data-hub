@@ -39,6 +39,16 @@ async def health(svc: ServicesDep) -> JSONResponse:
     return JSONResponse(body, status_code=200 if svc.role == "active" and db_ok else 503)
 
 
+@router.get("/api/system/info")
+async def info(svc: ServicesDep, _: Annotated[Principal, Depends(require("self"))]
+               ) -> dict[str, Any]:
+    """What the dashboard needs to know about this hub (any signed-in user)."""
+    return {"version": VERSION, "node": svc.settings.node_id, "role": svc.role,
+            "timezone": svc.settings.timezone, "control_enabled": svc.settings.control_enabled,
+            "session_idle_minutes": svc.settings.session_idle_minutes,
+            "password_min_length": svc.settings.password_min_length}
+
+
 @router.get("/api/system/nodes")
 async def nodes(svc: ServicesDep, _: Engineer) -> list[dict[str, Any]]:
     """HA nodes with role and heartbeat."""
@@ -65,6 +75,11 @@ async def config_report(svc: ServicesDep, _: Engineer) -> dict[str, Any]:
             "brokers": [b.model_dump(mode="json") for b in svc.report.brokers.values()],
             "alarms": svc.report.alarms.model_dump(mode="json"),
             "control": svc.report.control.model_dump(mode="json"),
+            # channel names and types only: addresses and recipients stay in the file
+            "notifications": {
+                "channels": {name: c.type for name, c in
+                             svc.report.notifications.channels.items()},
+                "rules": [r.model_dump(mode="json") for r in svc.report.notifications.rules]},
             "issues": [i.model_dump(mode="json") for i in svc.report.issues]}
 
 

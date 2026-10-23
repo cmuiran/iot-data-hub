@@ -59,6 +59,7 @@ desktop.ini
 # Local simulation / development databases
 .sim/
 .dev/
+.preview/
 
 # Runtime data that must never be committed
 pki/

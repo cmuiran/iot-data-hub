@@ -60,9 +60,10 @@ backend/
 simulators/        Modbus TCP server, MQTT broker + devices, OPC UA server; run.py = `hub-sim`
 db/migrations/     0001_core, 0002_timescale (optional), 0003_operations, 0004_security
 scripts/windows/   Windows service install/uninstall (WinSW)
-frontend/          Web dashboard (not started)
+frontend/          Web dashboard served by hub-api at / (docs/frontend.md): plain ES modules,
+                   no build step, no npm; js/views/ one file per page; i18n/fa.json + en.json
 tests/             unit, drivers (vs simulators), storage/db (real PostgreSQL via pgserver),
-                   api, e2e (uvicorn + WebSocket + all three protocols)
+                   api, e2e (uvicorn + WebSocket + all three protocols), frontend (static rules)
 .claude/skills/    Project-specific Claude Code skills (add-device, ...)
 ```
 
@@ -131,4 +132,8 @@ programs with `hub.runtime.run()`, never bare `asyncio.run()`.
 
 - Code, comments, identifiers, commit messages, and docs: **English**.
 - User-facing UI supports **Persian (fa) with RTL layout**, plus English. All UI strings go through
-  i18n resources — no hard-coded user-facing text in components.
+  i18n resources — no hard-coded user-facing text in components. Add every new key to both
+  `frontend/i18n/fa.json` and `en.json` (tests/frontend checks parity and usage).
+- Frontend code: build DOM with `ui.h()` (text nodes), never `innerHTML`; no inline scripts or
+  `style=` attributes (the CSP forbids them; set styles through `el.style`); no external URLs;
+  commands only via `POST /api/control/write`.
