@@ -35,6 +35,7 @@ class Services:
     role: str = "active"     # "standby" on the passive node of an HA pair
     security_watch: Any = None
     northbound: Any = None      # backend.northbound.Northbound (config/northbound.yaml)
+    health_watch: Any = None    # backend.health_watch.HealthWatch (system health alarms)
     modbus_server: Any = None   # backend.modbus_server.HubModbusServer
 
     def __post_init__(self) -> None:
@@ -56,6 +57,10 @@ class Services:
             from backend.opcua_server import HubOpcUaServer
 
             self.opcua_server = HubOpcUaServer(self)
+        if self.health_watch is None:
+            from backend.health_watch import HealthWatch
+
+            self.health_watch = HealthWatch(self)
         if self.northbound is None:
             from backend.northbound import Northbound
 
@@ -94,6 +99,8 @@ class Services:
             await self.modbus_server.start()
         if self.security_watch is not None:
             await self.security_watch.start()
+        if self.health_watch is not None:
+            await self.health_watch.start()
         if self.maintenance is not None:
             await self.maintenance.start()
 
@@ -132,6 +139,17 @@ class Services:
                         [({"target": r["name"]}, r["queued"]) for r in rows]))
             out.append(("hub_northbound_connected", "gauge", "1 while connected to the broker",
                         [({"target": r["name"]}, 1 if r["connected"] else 0) for r in rows]))
+        if self.health_watch is not None and self.health_watch.results:
+            level = {"ok": 0, "unknown": 0, "warning": 1, "critical": 2}
+            out.append(("hub_health_check", "gauge",
+                        "Health checks of the hub: 0 ok, 1 warning, 2 critical",
+                        [({"check": r.name}, level.get(r.status, 0))
+                         for r in self.health_watch.results.values()]))
+            disks = [r for r in self.health_watch.results.values() if r.name.startswith("disk:")]
+            if disks:
+                out.append(("hub_disk_free_percent", "gauge", "Free space of the hub's volumes",
+                            [({"volume": r.details["volume"]}, r.details["free_percent"])
+                             for r in disks]))
         if self.modbus_server is not None and self.modbus_server.server is not None:
             out.append(("hub_modbus_server_events_total", "counter",
                         "Modbus server requests, exceptions and writes",
@@ -156,6 +174,8 @@ class Services:
 
     async def stop(self) -> None:
         """Stop everything that talks to devices (also used to demote an HA node)."""
+        if self.health_watch is not None:
+            await self.health_watch.stop()
         if self.security_watch is not None:
             await self.security_watch.stop()
         if self.opcua_server is not None:

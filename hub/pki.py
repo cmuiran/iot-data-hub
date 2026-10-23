@@ -28,7 +28,7 @@ async def make_certificate(directory: Path, name: str, role: str, *, uri: str | 
 
     if role not in ("client", "server"):
         raise ValueError("role must be client or server")
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - once, at setup
     cert, key = directory / f"{name}.der", directory / f"{name}.pem"
     use = [ExtendedKeyUsageOID.CLIENT_AUTH] if role == "client" else [
         ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
@@ -109,7 +109,7 @@ async def trust_validator(trusted_dir: Path):  # type: ignore[no-untyped-def]
     from asyncua.crypto.truststore import TrustStore
     from asyncua.crypto.validator import CertificateValidator, CertificateValidatorOptions
 
-    trusted_dir.mkdir(parents=True, exist_ok=True)
+    trusted_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - once, at startup
     store = TrustStore([trusted_dir], [])
     await store.load()
     options = (CertificateValidatorOptions.TRUSTED_VALIDATION

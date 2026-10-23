@@ -113,6 +113,8 @@ translation). Interactive docs: `/api/docs` (OpenAPI at `/api/openapi.json`).
 | GET | /api/audit/writes | audit.read | `tag`, `user_id`, `request_id`, `since`, `limit` |
 | GET | /api/audit/auth | audit.read | `event`, `limit` |
 | GET | /api/system/info | signed in | version, node, HA role, time zone, control on/off, idle minutes, password length (for the dashboard) |
+| GET | /api/versions | — | API versions served (`current`, `supported`, `base` = `/api/v1`) and the hub version |
+| GET | /api/system/health-checks | config.edit | results of the hub's own health checks (`?run=true` checks now) |
 | GET | /api/system/outputs | config.edit | northbound MQTT targets (connected, published, queued, dropped), Modbus server and OPC UA server status |
 | GET | /api/system/stats | config.edit | samples received/written/buffered/dropped, device states |
 | GET | /api/system/config | config.edit | the running configuration (secrets are env var names) |
@@ -167,6 +169,8 @@ two processes must not both start the embedded database.) API docs: http://127.0
 
 `hub --config-dir config` prints every tag of every device every 5 s (no API, no login). Compare
 with the device display: wrong base address or word order shows up immediately.
+
+The full procedure (and `hub-commission`) is in section 25 and, in Persian, docs/fa/commissioning.md.
 
 ### Backups and retention
 
@@ -395,3 +399,200 @@ request. Modbus has no authentication, so:
   exception 01.
 
 Status: `GET /api/system/outputs`, System page, metric `hub_modbus_server_events_total`.
+
+## 20. The hub watches itself (phase 4)
+
+`backend/health_watch.py` runs every `HUB_HEALTH_INTERVAL_S` (30 s) on the active node. Each
+problem becomes a system alarm, so it appears in the alarm list and reaches people through the
+notification rules (put a rule with `min_severity: high` on an e-mail or Telegram channel):
+
+| Check | Alarm | Raised when | Severity |
+|---|---|---|---|
+| database | `system:database` | 3 checks in a row without an answer | critical |
+| disk | `system:disk:<volume>` | free space below `HUB_DISK_WARN_PERCENT` (10) / `HUB_DISK_CRITICAL_PERCENT` (5) on the volumes of config, logs, backups and the working folder | high / critical |
+| backup | `system:backup` | the last backup failed, or none for `HUB_BACKUP_MAX_AGE_HOURS` (26) | high |
+| restore | `system:restore` | the last restore test failed (section 22) | critical |
+| clock | `system:clock` | the clock differs from the database server, or from `HUB_NTP_SERVER`, by more than `HUB_CLOCK_MAX_SKEW_S` (30) | high |
+| storage | `system:storage` | more than half the sample buffer waits for the database (high); samples were lost because it was full (critical) | high / critical |
+| loop | `system:loop` | the hub was unresponsive for more than 2 s | medium |
+
+Alarms clear by themselves when the condition is gone. A database outage cannot be stored while
+it lasts: the alarm is still sent to the notification channels, and is written to the alarm
+history (with start and end) once the database answers again. Results: System page ("Hub
+health", with "Check now"), `GET /api/system/health-checks`, metrics `hub_health_check{check}`
+(0 ok, 1 warning, 2 critical) and `hub_disk_free_percent{volume}`. Certificate expiry and the
+audit chain stay with the daily security watch (section 15).
+
+## 21. Structured logs and SIEM
+
+| Setting | Effect |
+|---|---|
+| `HUB_LOG_FORMAT=json` | the log file (`HUB_LOG_FILE`) gets one JSON object per line: `ts` (UTC), `level`, `logger`, `msg`, `node`, `pid`, plus structured fields |
+| `HUB_SYSLOG=udp://siem:514` or `tcp://siem:601` | every record also goes to the syslog server as RFC 5424 with a JSON body; TCP uses newline framing and reconnects after a cut |
+| `HUB_SYSLOG_FACILITY` | `local0` (default) … `local7`, `daemon`, … |
+
+Secrets are redacted in every output. The logger `hub.audit` (syslog MSGID `audit`) carries a
+copy of every audit row — sign-ins, administration, alarm actions, configuration changes and each
+command with its phase and result — with its fields under `audit`; security events
+(`login_failed`, `locked`, `mfa_failed`, `network_denied`, …) are logged as warnings. If an
+audit row cannot be stored, an error with the full row is logged instead, so the SIEM still has
+it. An unreachable syslog server never stops the hub.
+
+## 22. Backups that are known to restore
+
+`HUB_RESTORE_TEST` checks every new backup:
+
+* `archive` (default): the dump's table of contents is read (`pg_restore --list`) — the file is
+  complete, readable (with `HUB_DATA_KEY` when encrypted) and contains the hub's tables;
+* `full`: in addition, every `HUB_RESTORE_TEST_DAYS` (7) the backup is restored into a temporary
+  database on the same server, the schema version and key tables are compared and **both audit
+  hash chains are verified in the copy**; the temporary database is dropped. Needs the CREATEDB
+  privilege for the hub's database user;
+* `off`.
+
+Results are `restore_ok` / `restore_failed` system events and the `system:restore` alarm. By
+hand: `hub-admin verify-backup <file> [--full]`. Restore: stop the service, then
+`hub-admin restore-backup <file> --yes` (replaces the whole database; decrypts when needed).
+
+## 23. API versions
+
+`/api/v1/...` is the stable API for integrations (SCADA, reports, scripts): it keeps its routes
+and fields across hub upgrades; a future incompatible API becomes `/api/v2` next to it.
+`/api/...` (without a version) is an alias of the current version, used by the bundled dashboard.
+Every API answer carries the header `API-Version: 1`; an unknown version answers 404
+`unsupported_api_version`; `GET /api/versions` lists what this hub serves. The live WebSocket is
+`/api/v1/ws` (or `/api/ws`).
+
+## 24. Upgrade and rollback
+
+Migrations only go forward, and a hub refuses to start on a database that a **newer** hub has
+migrated (`refusing to start: the database has migration(s) … that this version does not
+know`), so an old version can never silently run on a newer schema.
+
+Before an upgrade:
+
+```
+.venv\Scripts\hub-admin.exe upgrade-check        # config valid, schema state, tools, backup < 24 h, disk
+.venv\Scripts\hub-admin.exe migrate --dry-run    # which migrations the new version would add
+```
+
+Upgrade (elevated PowerShell; `-Wheelhouse` for an offline plant network):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\windows\upgrade.ps1 -Source D:\hub-0.6.0 [-Wheelhouse D:\wheels]
+```
+
+The script runs `upgrade-check`, writes a backup to `backups\pre-upgrade`, stops the service,
+moves the current program files and `.venv` to `rollback\<time>-<version>`, installs the new
+version, starts it (it migrates the database and records an `upgrade` event) and waits until
+`/api/health` is ok and `/api/versions` reports the new version. On any failure it rolls back
+on its own. Site data — `.env`, `config\`, `pki\`, `logs\`, `backups\` — is never touched.
+
+Rollback by hand (e.g. a problem found a day later):
+
+```
+powershell -ExecutionPolicy Bypass -File rollback\<time>-<version>\scripts\windows\rollback.ps1 -From rollback\<time>-<version>
+```
+
+It restores the old program files and `.venv`, and — only if the new version migrated the
+database — the pre-upgrade backup (data recorded since the upgrade is then lost; the script says
+so). Remove the `rollback\` copy after some days of normal operation.
+
+## 25. Field commissioning (phase 5)
+
+`hub-commission` (hub/commission.py) is read-only: it reads, browses and subscribes, and contains
+no write primitive (a test enforces it). Writes stay with the control-safety layer. Credentials
+come from the environment (`--env-file .env`); `--device <id>` takes address, security and
+credentials from that device's configuration, otherwise host/endpoint flags describe a device that
+is not configured yet. Exit code 0 ok, 1 problem found, 2 usage or configuration error.
+
+| Command | What it shows |
+|---|---|
+| `read [ids] [--seconds 10] [--out f.md\|f.json]` | runs the real drivers (disabled devices too, so a device is checked before it is enabled): per tag value, quality, updates, min/max, hints (no value, BAD read, implausible float → word order, outside min/max). `.md` is a SAT sheet with a "verified on site" column |
+| `modbus-probe --address A \| --ref 40101 [--register input] [--count 4] [--expect V]` | the registers from A-1 (shows a 1-based datasheet) as uint16/int16 and every float32/int32/uint32/float64 in the four byte/word orders, the connection's order marked; `--expect` = the value on the display → matching type, order, address and power-of-ten scale, plus a tag snippet. Modbus exceptions are explained |
+| `modbus-scan [--units 1-247]` | which unit ids answer (an exception answer counts; gateway exceptions 10/11 do not) |
+| `opcua-browse [--endpoint URL \| --device id] [--node i=85] [--depth 4]` | variables with NodeId, type, value and r/rw; `--yaml` tag suggestions with the hub data types |
+| `mqtt-listen [--broker id \| --device id \| --host] [--topic] [--seconds]` | topics, message rate, every JSON field with its `json_path`; `--yaml` per topic |
+| `snmp-walk [--device id \| --host --community-env VAR] [--oid]` | OIDs with SNMP type and value (stops at the end of the subtree or a non-advancing agent); well-known system and UPS-MIB OIDs get names |
+| `s7-dump --db N --start S --size L [--area DB\|M\|I\|Q] [--expect V]` | hex dump plus INT/WORD/DINT/REAL at every even offset; `--expect` → address such as `DB1.DBD4` |
+| `http-get [--url \| --device id] [--path]` | status and every JSON field; with `--device` and no `--path` every endpoint the device's tags use |
+
+`--yaml` suggestions are a starting point (names from the source, no units or limits); they go
+through the add-device skill or the configuration page and `python -m hub.validate_config` like
+any other change.
+
+`hub-admin notify-test [channel ...]` sends a test message on the channels of
+`config/notifications.yaml` without a database and prints `sent` or `FAILED - <reason>` per
+channel (the API equivalent is `POST /api/notifications/test/{channel}`).
+
+The field procedure, the remote-write test protocol (with `HUB_CONTROL_ENABLED`), the SAT
+checklist, the report template and the training plan are the Persian guides in docs/fa/.
+
+## 26. Productization (phase 6)
+
+### Installation and packaging
+
+| Way | How | When |
+|---|---|---|
+| Offline Windows bundle | `scripts\windows\build-bundle.ps1` on a machine with internet → `release\iot-data-hub-<version>-windows.zip` (+ `.sha256`): program, `wheelhouse\` (exactly `requirements.lock`, plus pip and setuptools), `config.dist\`, `SHA256SUMS.txt`. Refuses to bundle `.env`, keys and certificates | plant networks without internet (the normal case) |
+| First install | `scripts\windows\install.ps1 [-DatabaseUrl ...] [-AdminUser ...] [-Account ...] [-NoService]`: `.venv` offline from the wheelhouse, `config\` from the samples, `.env` with random `HUB_JWT_SECRET`/`HUB_DATA_KEY` (never printed) and ACL Administrators + SYSTEM, `HUB_CONTROL_ENABLED=false`, validate, migrate, first admin, service. Idempotent | every new server |
+| Docker (Linux) | `Dockerfile` (python:3.12-slim, locked versions, `pg_dump` client, user `hub` uid 10001, health check) and `docker-compose.yml` (TimescaleDB 2.17 / PostgreSQL 17, database not published, config/pki/backups mounted) | sites above the Windows connection budget, or a Linux preference |
+| Upgrade | `upgrade.ps1` (section 24) now installs the locked versions and the program editable | — |
+
+`requirements.lock` (generated by `scripts/lock.py` from the installed runtime dependency tree;
+`--check` in CI) is the single list of shipped versions: the bundle, the image, CI and the
+dependency audit all use it. After changing dependencies: install, test, `python scripts/lock.py`.
+
+The program finds `db/migrations` and `frontend/` next to the code (editable install), else in
+`HUB_HOME`, else in the working directory (`hub/paths.py`).
+
+### CI/CD
+
+`.github/workflows/ci.yml`: **lint** (ruff, bandit, pip-audit on the lock) → **test** on
+`windows-latest` and `ubuntu-latest` (locked versions, `validate_config`, the whole suite with
+the simulators and pgserver) → on tags `v*` and manual runs: **loadtest** (200 × 20 on Windows,
+JSON as artifact), **package** (the offline bundle as artifact) and **docker** (image build +
+config check inside). A weekly run repeats the audit and the load test so new advisories show
+up without a code change. `python scripts/check.py [--quick] [--offline] [--load]` runs the same
+checks locally.
+
+### Security
+
+See docs/security-assessment.md: methods, the 30 automated penetration checks
+(`tests/api/test_pentest.py`), findings and fixes, residual risks, scope for the independent test.
+`HUB_API_DOCS` (default off in production, on with `--dev`) controls `/api/docs` and
+`/api/openapi.json`.
+
+### Load test and capacity
+
+```
+hub-loadtest --devices 300 --tags 20 --seconds 180 [--mix modbus=0.7,mqtt=0.2,opcua=0.1]
+             [--poll-ms 1000] [--database-url URL | --embedded-db DIR] [--json r.json] [--profile p.prof]
+```
+
+It generates the configuration, runs the simulators in two separate processes (Modbus/OPC UA on
+the proactor loop, broker + MQTT publishers on the selector loop), and measures the real hub with
+one live subscriber (an open dashboard). Checks: ≥ 99 % devices online, no sample dropped or
+failed to write, newest value per device younger than 3 poll periods + 1 s, event loop lag p99
+≤ 250 ms, write buffer ≤ 5 s of input, history query p95 ≤ 500 ms. Exit code 1 when one fails.
+
+Result on the development laptop (Windows 11, Python 3.12, embedded PostgreSQL 16.2 without
+TimescaleDB), 300 devices (210 Modbus TCP each with its own address, 60 MQTT, 30 OPC UA),
+6000 tags at 1 s, 180 s measured: 5 856 samples/s received, 5 189/s stored (rest unchanged),
+0 lost, buffer max 3 163, newest values ≤ 1.9 s old, loop lag p99 72 ms, history query p95
+59 ms, CPU 70 % of one core (max 97 %), 124 MB, database 137 MB after the run. All checks pass.
+
+Two limits found and handled:
+
+* **Database writes**: `write_samples` and device status are one statement per batch with
+  arrays (`INSERT ... SELECT FROM unnest(...)`); per-row `executemany` capped the hub near
+  2000 samples/s and lost data at 300 devices.
+* **Windows socket budget**: the selector loop's `select()` takes at most 512 sockets and the
+  whole loop fails beyond. `device_connections()` counts the enabled devices' connections
+  (a Modbus gateway host:port counts once; every MQTT, OPC UA, S7, HTTP, SNMP device once;
+  COM ports not at all); `validate_config` warns above 320 and refuses above 400 on Windows.
+
+Planning rule: about 5000 samples/s per hub (one core) and at most 400 device connections per
+hub on Windows; beyond that poll slower, use gateways, run on Linux (Docker) or split the plant
+over two hubs.
+

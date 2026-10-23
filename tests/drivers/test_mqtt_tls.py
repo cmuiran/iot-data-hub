@@ -91,7 +91,8 @@ async def test_mutual_tls_receives_data(broker: EmbeddedBroker, pki: dict[str, A
 async def test_server_certificate_is_checked(broker: EmbeddedBroker, settings: dict[str, Any],
                                              expect: str) -> None:
     rec = Recorder()
-    driver = MqttJsonDriver(sensor(), rec.on_samples, rec.on_status, broker=entry(broker, **settings))
+    driver = MqttJsonDriver(sensor(), rec.on_samples, rec.on_status,
+                            broker=entry(broker, **settings))
     await driver.start()
     try:
         await rec.wait_for(lambda: rec.state is DeviceState.OFFLINE)

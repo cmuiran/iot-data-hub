@@ -27,6 +27,7 @@ from hub.drivers.mqtt_json import _MISSING, extract
 from hub.models import (
     HttpBasicAuth,
     HttpBearerAuth,
+    HttpConnection,
     HttpDevice,
     HttpHeaderAuth,
     HttpTag,
@@ -49,6 +50,24 @@ class _PathError(Exception):
     """The endpoint answered, but not with usable JSON."""
 
 
+def build_client(c: HttpConnection) -> httpx.AsyncClient:
+    """The HTTP client with the connection's auth, headers and TLS (also used by
+    hub-commission)."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json", **c.headers}
+    auth: httpx.Auth | None = None
+    if isinstance(c.auth, HttpBasicAuth):
+        auth = httpx.BasicAuth(_env(c.auth.username_env), _env(c.auth.password_env))
+    elif isinstance(c.auth, HttpBearerAuth):
+        headers["Authorization"] = f"Bearer {_env(c.auth.token_env)}"
+    elif isinstance(c.auth, HttpHeaderAuth):
+        headers[c.auth.header] = _env(c.auth.value_env)
+    verify: bool | ssl.SSLContext = c.verify_tls
+    if c.verify_tls and c.ca_file_env:
+        verify = ssl.create_default_context(cafile=_env(c.ca_file_env))
+    return httpx.AsyncClient(base_url=c.base_url, headers=headers, auth=auth, verify=verify,
+                             timeout=c.timeout_ms / 1000, follow_redirects=False)
+
+
 class HttpJsonDriver(Driver[HttpDevice]):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
@@ -58,20 +77,7 @@ class HttpJsonDriver(Driver[HttpDevice]):
         self._client: httpx.AsyncClient | None = None
 
     def _build_client(self) -> httpx.AsyncClient:
-        c = self.device.connection
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json", **c.headers}
-        auth: httpx.Auth | None = None
-        if isinstance(c.auth, HttpBasicAuth):
-            auth = httpx.BasicAuth(_env(c.auth.username_env), _env(c.auth.password_env))
-        elif isinstance(c.auth, HttpBearerAuth):
-            headers["Authorization"] = f"Bearer {_env(c.auth.token_env)}"
-        elif isinstance(c.auth, HttpHeaderAuth):
-            headers[c.auth.header] = _env(c.auth.value_env)
-        verify: bool | ssl.SSLContext = c.verify_tls
-        if c.verify_tls and c.ca_file_env:
-            verify = ssl.create_default_context(cafile=_env(c.ca_file_env))
-        return httpx.AsyncClient(base_url=c.base_url, headers=headers, auth=auth, verify=verify,
-                                 timeout=c.timeout_ms / 1000, follow_redirects=False)
+        return build_client(self.device.connection)
 
     async def _connect(self) -> None:
         self._client = self._build_client()

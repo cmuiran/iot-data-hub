@@ -26,8 +26,9 @@ TEMP = "kish.warehouse.env_sensor_01.temperature"
 def services() -> Any:
     unit = SimpleNamespace(unit="kW")
     return SimpleNamespace(
-        hub=SimpleNamespace(bus=LiveBus(), latest={}, tags={POWER: (None, unit),
-                                                            TEMP: (None, SimpleNamespace(unit="degC"))}),
+        hub=SimpleNamespace(bus=LiveBus(), latest={},
+                            tags={POWER: (None, unit),
+                                  TEMP: (None, SimpleNamespace(unit="degC"))}),
         settings=SimpleNamespace(node_id="node_a"))
 
 

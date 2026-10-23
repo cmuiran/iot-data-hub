@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,10 +53,60 @@ def _ui_csp(request: Request) -> str:
     return _UI_CSP.format(ws=f"{scheme}://{host}" if host else "")
 
 
+API_VERSION = "1"
+SUPPORTED_VERSIONS = ("1",)
+_VERSIONED = re.compile(r"^/api/v(\d+)(/.*)?$")
+
+
+class ApiVersions:
+    """``/api/v1/...`` is the stable, versioned API; ``/api/...`` is an alias of the current
+    version (used by the bundled dashboard). Every API answer carries ``API-Version``; an
+    unknown version is refused with ``unsupported_api_version`` instead of a confusing 404.
+    A future v2 adds its routes while v1 keeps answering for existing integrations."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        match = _VERSIONED.match(path)
+        if match and match[1] not in SUPPORTED_VERSIONS:
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 4404})
+                return
+            body = json.dumps({"error": "unsupported_api_version",
+                               "message": f"API v{match[1]} is not available; supported: "
+                                          + ", ".join(f"v{v}" for v in SUPPORTED_VERSIONS)}
+                              ).encode()
+            await send({"type": "http.response.start", "status": 404,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"api-version", API_VERSION.encode())]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        if match:
+            new = "/api" + (match[2] or "")
+            scope = dict(scope, path=new, raw_path=new.encode())
+        if scope["type"] == "http" and scope["path"].startswith("/api"):
+            async def send_with_version(message: dict[str, Any]) -> None:
+                if message["type"] == "http.response.start":
+                    message = dict(message, headers=[*message.get("headers", []),
+                                                     (b"api-version", API_VERSION.encode())])
+                await send(message)
+
+            await self.app(scope, receive, send_with_version)
+            return
+        await self.app(scope, receive, send)
+
+
 def create_app(services: Services) -> FastAPI:
     """The services are started/stopped by the caller (backend.server or a test)."""
+    docs = services.settings.api_docs
     app = FastAPI(title="Industrial IoT Data Hub", version=system.VERSION,
-                  docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
+                  docs_url="/api/docs" if docs else None,
+                  openapi_url="/api/openapi.json" if docs else None, redoc_url=None)
     app.state.services = services
 
     if services.settings.cors_origins:
@@ -130,7 +183,19 @@ def create_app(services: Services) -> FastAPI:
                    metrics, ws):
         app.include_router(module.router)
     _mount_frontend(app, services.settings.frontend_dir)
+    app.add_middleware(ApiVersions)   # outermost: /api/v1 is mapped before the guards run
     return app
+
+
+class _FrontendFiles(StaticFiles):
+    """StaticFiles that answers 404 for names the file system rejects (on Windows ``:``,
+    ``*``, ``?``, ... raise OSError inside the lookup, which would otherwise be a 500)."""
+
+    def lookup_path(self, path: str) -> tuple[str, os.stat_result | None]:
+        try:
+            return super().lookup_path(path)
+        except (OSError, ValueError):
+            return "", None
 
 
 def _mount_frontend(app: FastAPI, directory: Path | None) -> None:
@@ -140,4 +205,4 @@ def _mount_frontend(app: FastAPI, directory: Path | None) -> None:
     if not (directory / "index.html").is_file():
         log.warning("HUB_FRONTEND_DIR %s has no index.html; serving the API only", directory)
         return
-    app.mount("/", StaticFiles(directory=directory, html=True), name="frontend")
+    app.mount("/", _FrontendFiles(directory=directory, html=True), name="frontend")

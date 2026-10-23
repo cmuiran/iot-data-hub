@@ -46,9 +46,9 @@ from hub.models import (
 )
 from hub.runtime import run
 from hub.validate_config import print_report
+from simulators.http_sim import HttpSimServer, SimulatedHttpDevice
 from simulators.modbus_sim import ModbusSimServer, SimulatedModbusDevice
 from simulators.mqtt_sim import EmbeddedBroker, SimulatedMqttDevice
-from simulators.http_sim import HttpSimServer, SimulatedHttpDevice
 from simulators.opcua_sim import SimulatedOpcUaServer
 from simulators.s7_sim import S7SimServer, SimulatedS7Device
 from simulators.snmp_sim import SimulatedSnmpDevice, SnmpSimAgent

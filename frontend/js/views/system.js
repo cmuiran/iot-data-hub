@@ -16,7 +16,7 @@ async function section(box, title, load) {
 
 export async function render(page, { setTitle }) {
   setTitle(t('system.title'));
-  const boxes = Object.fromEntries(['hub', 'nodes', 'certs', 'backup', 'notify', 'events', 'config', 'outputs'].map((k) => [k, h('div')]));
+  const boxes = Object.fromEntries(['health', 'hub', 'nodes', 'certs', 'backup', 'notify', 'events', 'config', 'outputs'].map((k) => [k, h('div')]));
 
   const loadHub = () => section(boxes.hub, t('system.hub'), async () => {
     const [st, health] = await Promise.all([api('api/system/stats'), api('api/health').catch((e) => e.body)]);
@@ -103,6 +103,23 @@ export async function render(page, { setTitle }) {
     ], events, { emptyText: t('system.no_events') });
   });
 
+  const STATUS = { ok: 'online', warning: 'uncertain', critical: 'error', unknown: 'unknown' };
+  const loadHealth = (run = false) => section(boxes.health, t('system.health'), async () => {
+    const res = await api('api/system/health-checks', { query: { run: run || undefined } });
+    const label = (name) => (name.startsWith('disk:') ? `${t('system.check_disk')} ${name.slice(5).toUpperCase()}`
+      : tMaybe(`system.check_${name}`) || name);
+    return [
+      h('div', { class: 'row between' },
+        h('span', { class: 'small muted' }, res.last_run ? `${t('system.checked')} ${fmtAgo(res.last_run)}` : t('system.not_checked')),
+        button(t('system.check_now'), () => loadHealth(true), { size: 'sm', iconName: 'refresh' })),
+      table([
+        { label: t('system.check'), render: (c) => label(c.check) },
+        { label: t('system.state'), render: (c) => badge(t(`system.health_${c.status}`), STATUS[c.status] || 'unknown', true) },
+        { label: t('system.detail'), render: (c) => h('span', { class: 'small' }, c.message) },
+      ], res.checks, { emptyText: t('system.not_checked') }),
+    ];
+  });
+
   const loadOutputs = () => section(boxes.outputs, t('system.outputs'), async () => {
     const out = await api('api/system/outputs');
     const ms = out.modbus_server;
@@ -137,9 +154,10 @@ export async function render(page, { setTitle }) {
   mount(page,
     h('div', { class: 'page-head' }, h('div', null, h('h1', null, t('system.title')), h('div', { class: 'sub' }, t('system.subtitle'))),
       button(t('common.refresh'), () => all(), { iconName: 'refresh' })),
+    boxes.health,
     h('div', { class: 'grid wide' }, boxes.hub, boxes.nodes, boxes.config, boxes.certs),
     boxes.outputs, boxes.backup, boxes.notify, boxes.events);
-  const all = () => { loadHub(); loadNodes(); loadCerts(); loadOutputs(); loadBackup(); loadNotify(); loadEvents(); loadConfig(); };
+  const all = () => { loadHealth(); loadHub(); loadNodes(); loadCerts(); loadOutputs(); loadBackup(); loadNotify(); loadEvents(); loadConfig(); };
   all();
   return null;
 }

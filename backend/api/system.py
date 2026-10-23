@@ -18,7 +18,7 @@ router = APIRouter(tags=["system"])
 Auditor = Annotated[Principal, Depends(require("audit.read"))]
 Engineer = Annotated[Principal, Depends(require("config.edit"))]
 
-VERSION = "0.4.0"
+VERSION = "0.6.0"
 
 
 @router.get("/api/health")
@@ -39,6 +39,15 @@ async def health(svc: ServicesDep) -> JSONResponse:
     return JSONResponse(body, status_code=200 if svc.role == "active" and db_ok else 503)
 
 
+@router.get("/api/versions")
+async def versions() -> dict[str, Any]:
+    """API versions this hub serves (no authentication; for integrations and upgrades)."""
+    from backend.app import API_VERSION, SUPPORTED_VERSIONS
+
+    return {"current": API_VERSION, "supported": list(SUPPORTED_VERSIONS), "hub": VERSION,
+            "base": f"/api/v{API_VERSION}"}
+
+
 @router.get("/api/system/info")
 async def info(svc: ServicesDep, _: Annotated[Principal, Depends(require("self"))]
                ) -> dict[str, Any]:
@@ -47,6 +56,16 @@ async def info(svc: ServicesDep, _: Annotated[Principal, Depends(require("self")
             "timezone": svc.settings.timezone, "control_enabled": svc.settings.control_enabled,
             "session_idle_minutes": svc.settings.session_idle_minutes,
             "password_min_length": svc.settings.password_min_length}
+
+
+@router.get("/api/system/health-checks")
+async def health_checks(svc: ServicesDep, _: Engineer, run: bool = False) -> dict[str, Any]:
+    """Results of the hub's own health checks (``run=true`` checks again now)."""
+    if svc.health_watch is None:
+        return {"last_run": None, "checks": [], "open_alarms": []}
+    if run:
+        await svc.health_watch.run_once()
+    return svc.health_watch.describe()
 
 
 @router.get("/api/system/outputs")

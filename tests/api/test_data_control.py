@@ -141,9 +141,19 @@ async def test_rejected_writes_are_audited(backend: Backend, tag: str, value: An
 
 async def test_rbac_scope_for_writes(backend: Backend) -> None:
     await backend.user("op.pump", ("operator", "kish", "pump_station"))
+    await backend.user("op.pump.sees.gate", ("operator", "kish", "pump_station"),
+                       ("viewer", "kish", "gate"))
     await backend.user("viewer", ("viewer", None, None))
-    body = await write(backend, await backend.headers("op.pump"), LIMIT, 250.0)
+    # sees the gate area but may not write there: a normal, audited rejection
+    body = await write(backend, await backend.headers("op.pump.sees.gate"), LIMIT, 250.0)
     assert body["result"] == "rejected_rbac"
+    # does not even see the gate area: answered like an unknown tag, still audited
+    r = await backend.client.post("/api/control/write", headers=await backend.headers("op.pump"),
+                                  json={"tag": LIMIT, "value": 250.0})
+    assert r.status_code == 404 and r.json()["message"] == f"unknown tag {LIMIT}"
+    rows = await backend.store.list_write_audit(tag_path=LIMIT)
+    assert [(row.username, row.result) for row in rows[:2]] == [("op.pump", "rejected_rbac"),
+                                                                 ("op.pump", "requested")]
     r = await backend.client.post("/api/control/write", headers=await backend.headers("viewer"),
                                   json={"tag": LIMIT, "value": 250.0})
     assert r.status_code == 403                       # no tag.write anywhere: not even audited

@@ -14,7 +14,7 @@ from pysnmp.carrier.asyncio.dgram import udp
 from pysnmp.entity import config, engine
 from pysnmp.entity.rfc3413 import cmdrsp, context
 from pysnmp.proto import rfc1902
-from pysnmp.proto.rfc1905 import NoSuchObject
+from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchObject
 
 from hub.codec import Value, to_raw
 from hub.models import DataType, SnmpDevice, SnmpTag
@@ -47,7 +47,7 @@ class _Instrum:
         for oid, _ in var_binds:
             nxt = next((k for k in keys if k > tuple(oid)), None)
             out.append((rfc1902.ObjectName(nxt), self.agent.values[nxt]) if nxt
-                       else (oid, NoSuchObject()))
+                       else (oid, EndOfMibView()))
         return out
 
 

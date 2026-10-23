@@ -99,9 +99,24 @@ def broker_tls_context(broker: Broker) -> ssl.SSLContext:
             ctx.load_cert_chain(_env_path(broker.client_certificate_env),
                                 _env_path(broker.client_private_key_env))
         except ssl.SSLError as exc:
-            raise DriverError(f"client certificate/key for broker {broker.broker_id}: {exc}")                 from exc
+            raise DriverError(f"client certificate/key for broker {broker.broker_id}: {exc}") \
+                from exc
     ctx.server_name = broker.tls_server_name
     return ctx
+
+
+def client_kwargs(b: Broker, identifier: str) -> dict[str, object]:
+    """aiomqtt.Client arguments for a broker (also used by hub-commission)."""
+    kwargs: dict[str, object] = {
+        "hostname": b.host, "port": b.port, "keepalive": b.keepalive_s,
+        "identifier": identifier, "timeout": 10,
+    }
+    if b.username_env:
+        kwargs["username"] = os.environ.get(b.username_env)
+        kwargs["password"] = os.environ.get(b.password_env) if b.password_env else None
+    if b.tls:
+        kwargs["tls_context"] = broker_tls_context(b)
+    return kwargs
 
 
 def topic_matches(topic_filter: str, topic: str) -> bool:
@@ -147,17 +162,7 @@ class MqttJsonDriver(Driver[MqttDevice]):
     # --- connection ---------------------------------------------------------------------------
 
     def _client_kwargs(self) -> dict[str, object]:
-        b = self.broker
-        kwargs: dict[str, object] = {
-            "hostname": b.host, "port": b.port, "keepalive": b.keepalive_s,
-            "identifier": f"hub-{self.device.device_id}", "timeout": 10,
-        }
-        if b.username_env:
-            kwargs["username"] = os.environ.get(b.username_env)
-            kwargs["password"] = os.environ.get(b.password_env) if b.password_env else None
-        if b.tls:
-            kwargs["tls_context"] = broker_tls_context(b)
-        return kwargs
+        return client_kwargs(self.broker, f"hub-{self.device.device_id}")
 
     async def _connect(self) -> None:
         client = aiomqtt.Client(**self._client_kwargs())  # type: ignore[arg-type]

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -31,7 +32,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from hub.models import (
+    BIT_REGISTER_TYPES,
     DEVICE_ADAPTER,
+    MODBUS_WIDTH,
     NUMERIC_TYPES,
     PROTOCOLS,
     Access,
@@ -39,8 +42,6 @@ from hub.models import (
     Broker,
     BrokersFile,
     ControlFile,
-    BIT_REGISTER_TYPES,
-    MODBUS_WIDTH,
     DataType,
     HttpBasicAuth,
     HttpBearerAuth,
@@ -49,6 +50,7 @@ from hub.models import (
     ModbusDevice,
     ModbusRtuDevice,
     ModbusServerFile,
+    ModbusTag,
     MqttDevice,
     NorthboundFile,
     NotificationsFile,
@@ -168,7 +170,7 @@ _UniqueKeyLoader.add_constructor(
 def _read_yaml(path: Path, source: str, report: ConfigReport) -> Any | None:
     try:
         text = path.read_text(encoding="utf-8")
-        return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+        return yaml.load(text, Loader=_UniqueKeyLoader)  # nosec B506  # SafeLoader subclass
     except (OSError, UnicodeDecodeError) as exc:
         report.add(Severity.ERROR, source, f"cannot read file: {exc}")
     except yaml.YAMLError as exc:
@@ -230,6 +232,7 @@ def load_config(config_dir: Path | str, env: Mapping[str, str] | None = None) ->
     _check_modbus_endpoints(report)
     _check_serial_lines(report)
     _check_mqtt_topics(report)
+    _check_connection_budget(report)
 
     _load_optional(report, ALARMS_FILE, AlarmsFile, "alarms")
     _load_optional(report, CONTROL_FILE, ControlFile, "control")
@@ -598,6 +601,50 @@ def _check_serial_lines(report: ConfigReport) -> None:
                            f"{port} unit_id {this.device.connection.unit_id} is also used by "  # type: ignore[union-attr]
                            f"{other.device.device_id!r} ({other.source}){note}",
                            "connection.unit_id")
+
+
+# On Windows the hub runs on the selector event loop (aiomqtt and psycopg need it), whose
+# select() handles at most 512 sockets; past that the whole loop fails. Keep room for the
+# database pool, API clients and the outputs (docs/backend.md section 26).
+WINDOWS_SOCKET_LIMIT = 512
+DEVICE_CONNECTIONS_MAX = 400
+DEVICE_CONNECTIONS_WARN = 320
+
+
+def device_connections(devices: Iterable[AnyDevice]) -> int:
+    """Network connections the drivers open for the enabled devices.
+
+    Modbus TCP devices on one host:port (a gateway) share one connection; every other
+    device has its own (MQTT: one client per device). Serial ports are not sockets.
+    """
+    modbus: set[tuple[str, int, str]] = set()
+    serial_sockets: set[str] = set()
+    other = 0
+    for device in devices:
+        if not device.enabled:
+            continue
+        if isinstance(device, ModbusDevice):
+            c = device.connection
+            modbus.add((c.host.lower(), c.port, c.framer))
+        elif isinstance(device, ModbusRtuDevice):
+            port = device.connection.port.lower()
+            if "://" in port:                      # socket:// or rfc2217:// serial servers
+                serial_sockets.add(port)
+        else:
+            other += 1
+    return len(modbus) + len(serial_sockets) + other
+
+
+def _check_connection_budget(report: ConfigReport, platform: str = sys.platform) -> None:
+    n = device_connections(d.device for d in report.devices)
+    if platform != "win32" or n <= DEVICE_CONNECTIONS_WARN:
+        return
+    severity = Severity.ERROR if n > DEVICE_CONNECTIONS_MAX else Severity.WARNING
+    report.add(severity, "devices",
+               f"{n} device connections: on Windows one hub handles at most "
+               f"{DEVICE_CONNECTIONS_MAX} (the event loop is limited to {WINDOWS_SOCKET_LIMIT} "
+               "sockets). Put Modbus devices behind gateways, run the hub on Linux (Docker), "
+               "or split the devices over two hubs")
 
 
 def _check_mqtt_topics(report: ConfigReport) -> None:

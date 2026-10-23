@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import os
-import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -14,9 +12,9 @@ import pytest
 def pytest_asyncio_loop_factories(config: Any, item: Any) -> Mapping[str, Callable[[], Any]]:
     # aiomqtt (paho) and psycopg's async mode need the selector loop on Windows;
     # the hub itself runs on it too (hub.runtime.run).
-    if sys.platform == "win32":
-        return {"selector": asyncio.SelectorEventLoop}
-    return {"default": asyncio.new_event_loop}
+    from hub.runtime import new_event_loop
+
+    return {"hub": new_event_loop}
 
 
 # --- PostgreSQL ---------------------------------------------------------------------------------

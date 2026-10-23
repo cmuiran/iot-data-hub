@@ -183,7 +183,7 @@ class NorthboundPublisher:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 log.warning("northbound %s: %s (retry in %.0f s, %d queued)", self.target.name,
                             self.last_error, delay, len(self.queue))
-                await asyncio.sleep(delay * random.uniform(0.8, 1.2))
+                await asyncio.sleep(delay * random.uniform(0.8, 1.2))  # nosec B311  # jitter
                 delay = min(delay * 2, 60.0)
 
     def describe(self) -> dict[str, Any]:

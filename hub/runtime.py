@@ -16,6 +16,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import select
+import selectors
+import sys
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,11 +26,11 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from hub.alarms import AlarmEngine, AlarmRaise
-from hub.history import HistoryFilter
 from hub.config_loader import ConfigReport
 from hub.drivers import Driver, DriverError, create_driver
 from hub.drivers.base import AnyDevice, Clock, DeviceState, DeviceStatus, utcnow
-from hub.models import TagBase, Sample
+from hub.history import HistoryFilter
+from hub.models import Sample, TagBase
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ log = logging.getLogger(__name__)
 class Store(Protocol):  # the part of PostgresStore the runtime uses
     async def sync_config(self, devices: Any) -> Any: ...
     async def write_samples(self, samples: Any) -> int: ...
-    async def upsert_device_status(self, status: DeviceStatus) -> None: ...
+    async def upsert_device_statuses(self, statuses: list[DeviceStatus]) -> None: ...
     async def open_alarm(self, **kwargs: Any) -> Any: ...
     async def clear_alarm(self, source: str, cleared_at: datetime) -> Any: ...
     async def open_alarm_sources(self) -> dict[str, Any]: ...
@@ -257,7 +260,8 @@ class Hub:
             previous = self.latest.get(s.tag)
             if previous is None or s.timestamp >= previous.timestamp:
                 self.latest[s.tag] = s
-        self.bus.publish(sample_event(samples))
+        if self.bus.subscriber_count:            # no dashboard open: skip building the event
+            self.bus.publish(sample_event(samples))
         if self.store is not None:
             for s in samples:
                 found = self.tags.get(s.tag)
@@ -381,17 +385,52 @@ class Hub:
         self.stats.buffered = 0
         dirty, self._status_dirty = self._status_dirty, {}
         try:
-            for status in dirty.values():
-                await self.store.upsert_device_status(status)
+            if dirty:
+                await self.store.upsert_device_statuses(list(dirty.values()))
         except Exception:
             self._status_dirty = dirty | self._status_dirty
             raise
 
 
-def run(coro: Any) -> Any:
-    """asyncio.run on the selector loop (aiomqtt and psycopg need it on Windows)."""
-    import sys
+_WSAENOTSOCK = 10038
 
+
+class _ResilientSelector(selectors.SelectSelector):
+    """select() that survives a socket closed while still registered.
+
+    On Windows select() fails for *every* socket when one of them was closed behind the loop's
+    back (WinError 10038) - e.g. paho-mqtt after a refused TLS handshake - and that error would
+    stop the whole event loop, i.e. all drivers. The dead entries are dropped and select() runs
+    again; the owner of the socket has already closed it and handles its own error.
+    """
+
+    def select(self, timeout: float | None = None) -> list[tuple[Any, int]]:
+        for _ in range(3):
+            try:
+                return super().select(timeout)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != _WSAENOTSOCK:
+                    raise
+                self._drop_closed()
+                timeout = 0
+        return super().select(0)
+
+    def _drop_closed(self) -> None:
+        for key in list(self.get_map().values()):
+            try:
+                select.select([key.fd], [], [], 0)
+            except OSError:
+                self.unregister(key.fileobj)
+                log.warning("dropped a socket closed while registered (fd %s)", key.fd)
+
+
+def new_event_loop() -> asyncio.AbstractEventLoop:
+    """The hub's event loop: selector based on Windows (aiomqtt and psycopg need it)."""
     if sys.platform == "win32":
-        return asyncio.run(coro, loop_factory=asyncio.SelectorEventLoop)
-    return asyncio.run(coro)
+        return asyncio.SelectorEventLoop(_ResilientSelector())
+    return asyncio.new_event_loop()
+
+
+def run(coro: Any) -> Any:
+    """asyncio.run on the hub's event loop (see new_event_loop)."""
+    return asyncio.run(coro, loop_factory=new_event_loop)

@@ -60,6 +60,10 @@ desktop.ini
 .sim/
 .dev/
 .preview/
+.load/
+
+# Release bundles (scripts/windows/build-bundle.ps1)
+release/
 
 # Runtime data that must never be committed
 pki/

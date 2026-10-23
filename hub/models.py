@@ -139,7 +139,8 @@ class TagBase(_Strict):
     )
     states: dict[int, Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
         default=None, max_length=64,
-        description="labels for the values of an integer or bool tag, e.g. {0: stopped, 1: running}",
+        description="labels for the values of an integer or bool tag, "
+                    "e.g. {0: stopped, 1: running}",
     )
 
     @field_validator("states", mode="before")
@@ -162,7 +163,8 @@ class TagBase(_Strict):
             elif self.data_type not in INTEGER_RANGES:
                 raise ValueError("states (value labels) apply to integer and bool tags only")
             elif self.scale != 1.0 or self.offset != 0.0:
-                raise ValueError("states label raw integer values; do not combine with scale/offset")
+                raise ValueError("states label raw integer values; "
+                                 "do not combine with scale/offset")
         if not numeric and self.history_deadband is not None:
             raise ValueError("history_deadband only applies to numeric tags")
         if not numeric:

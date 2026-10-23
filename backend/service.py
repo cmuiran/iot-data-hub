@@ -9,7 +9,7 @@ after a crash (with back-off), and reads its settings from ``.env`` in that fold
 from __future__ import annotations
 
 from pathlib import Path
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape  # nosec B406  # writes XML, parses none
 
 SERVICE_ID = "iot-data-hub"
 
@@ -26,7 +26,7 @@ def render_winsw_xml(project_dir: Path, *, service_id: str = SERVICE_ID,
     return f"""<service>
   <id>{escape(service_id)}</id>
   <name>Industrial IoT Data Hub</name>
-  <description>Data hub: device drivers, storage, alarms, control and HTTP API (hub-api).</description>
+  <description>Data hub: drivers, storage, alarms, control and HTTP API (hub-api).</description>
   <executable>{escape(str(exe))}</executable>
   <workingdirectory>{escape(str(project_dir))}</workingdirectory>
   <startmode>Automatic</startmode>

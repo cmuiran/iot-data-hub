@@ -9,12 +9,12 @@ from datetime import time
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hub.maintenance import MaintenanceSettings
+from hub.paths import program_path
 
-
-BUNDLED_FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+BUNDLED_FRONTEND = program_path("frontend")
 
 
 def _frontend_dir(value: str | None) -> Path | None:
@@ -46,6 +46,8 @@ class Settings(BaseModel):
     password_min_length: int = Field(default=10, ge=8, le=128)
     pending_write_minutes: int = Field(default=5, ge=1, le=60)
     cors_origins: list[str] = Field(default_factory=list)
+    # interactive API docs + OpenAPI schema without sign-in: on in --dev, off in production
+    api_docs: bool = True
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     db_timescale: str = "auto"
@@ -88,6 +90,43 @@ class Settings(BaseModel):
     cert_warn_days: int = Field(default=30, ge=1, le=365)
     # web dashboard (frontend/), served at / by hub-api
     frontend_dir: Path | None = Field(default_factory=lambda: _frontend_dir(None))
+    # operations (phase 4): structured logs, syslog, health checks, restore tests
+    log_format: Literal["text", "json"] = "text"
+    syslog: str | None = None  # udp://host:514 | tcp://host:601
+    syslog_facility: str = "local0"
+    health_interval_s: int = Field(default=30, ge=5, le=3600)
+    disk_warn_percent: float = Field(default=10.0, gt=0, lt=100)
+    disk_critical_percent: float = Field(default=5.0, gt=0, lt=100)
+    clock_max_skew_s: float = Field(default=30.0, gt=0, le=3600)
+    ntp_server: str | None = None
+    backup_max_age_hours: int = Field(default=26, ge=1, le=24 * 30)
+    restore_test: Literal["off", "archive", "full"] = "archive"
+    restore_test_days: int = Field(default=7, ge=1, le=365)
+
+    @field_validator("syslog")
+    @classmethod
+    def _check_syslog(cls, value: str | None) -> str | None:
+        import re
+
+        if value is not None and not re.fullmatch(r"(udp|tcp)://[^\s/:]+:\d{1,5}", value):
+            raise ValueError("HUB_SYSLOG must be udp://host:port or tcp://host:port")
+        return value
+
+    @field_validator("syslog_facility")
+    @classmethod
+    def _check_facility(cls, value: str) -> str:
+        import logging.handlers
+
+        if value not in logging.handlers.SysLogHandler.facility_names:
+            raise ValueError(f"HUB_SYSLOG_FACILITY {value!r} is not a syslog facility "
+                             "(e.g. local0..local7, daemon, user)")
+        return value
+
+    @model_validator(mode="after")
+    def _check_disk_levels(self) -> Settings:
+        if self.disk_critical_percent >= self.disk_warn_percent:
+            raise ValueError("HUB_DISK_CRITICAL_PERCENT must be below HUB_DISK_WARN_PERCENT")
+        return self
 
     @field_validator("allowed_networks")
     @classmethod
@@ -98,7 +137,8 @@ class Settings(BaseModel):
             try:
                 ipaddress.ip_network(net, strict=False)
             except ValueError as exc:
-                raise ValueError(f"HUB_ALLOWED_NETWORKS: {net!r} is not an address/network")                     from exc
+                raise ValueError(f"HUB_ALLOWED_NETWORKS: {net!r} is not an address/network") \
+                    from exc
         return value
 
     @field_validator("data_key")
@@ -135,7 +175,8 @@ class Settings(BaseModel):
             retention_raw_days=self.retention_raw_days,
             retention_hourly_days=self.retention_hourly_days, backup_dir=self.backup_dir,
             backup_time=self.backup_time, backup_keep=self.backup_keep, timezone=self.timezone,
-            pg_dump=self.pg_dump, data_key=self.data_key)
+            pg_dump=self.pg_dump, data_key=self.data_key, restore_test=self.restore_test,
+            restore_test_days=self.restore_test_days)
 
     @field_validator("db_timescale")
     @classmethod
@@ -162,6 +203,7 @@ class Settings(BaseModel):
             password_min_length=int(e.get("HUB_PASSWORD_MIN_LENGTH", 10)),
             pending_write_minutes=int(e.get("HUB_PENDING_WRITE_MINUTES", 5)),
             cors_origins=_list(e.get("HUB_CORS_ORIGINS")),
+            api_docs=_bool(e.get("HUB_API_DOCS"), dev),
             host=e.get("HUB_HOST", "127.0.0.1"),
             port=int(e.get("HUB_PORT", 8000)),
             db_timescale=e.get("HUB_DB_TIMESCALE", "auto"),
@@ -198,6 +240,17 @@ class Settings(BaseModel):
             allowed_origins=_list(e.get("HUB_ALLOWED_ORIGINS")),
             cert_warn_days=int(e.get("HUB_CERT_WARN_DAYS", 30)),
             frontend_dir=_frontend_dir(e.get("HUB_FRONTEND_DIR")),
+            log_format=e.get("HUB_LOG_FORMAT", "text"),  # type: ignore[arg-type]
+            syslog=e.get("HUB_SYSLOG") or None,
+            syslog_facility=e.get("HUB_SYSLOG_FACILITY", "local0"),
+            health_interval_s=int(e.get("HUB_HEALTH_INTERVAL_S", 30)),
+            disk_warn_percent=float(e.get("HUB_DISK_WARN_PERCENT", 10)),
+            disk_critical_percent=float(e.get("HUB_DISK_CRITICAL_PERCENT", 5)),
+            clock_max_skew_s=float(e.get("HUB_CLOCK_MAX_SKEW_S", 30)),
+            ntp_server=e.get("HUB_NTP_SERVER") or None,
+            backup_max_age_hours=int(e.get("HUB_BACKUP_MAX_AGE_HOURS", 26)),
+            restore_test=e.get("HUB_RESTORE_TEST", "archive"),  # type: ignore[arg-type]
+            restore_test_days=int(e.get("HUB_RESTORE_TEST_DAYS", 7)),
         )
 
 

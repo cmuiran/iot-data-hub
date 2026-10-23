@@ -21,7 +21,7 @@ from pysnmp.proto import rfc1902
 
 from hub.codec import CodecError, Value, coerce
 from hub.drivers.base import DeviceState, Driver, DriverError, sleep_until_next
-from hub.models import DataType, SnmpDevice, SnmpTag, SnmpV2c, TagBase
+from hub.models import DataType, SnmpDevice, SnmpTag, SnmpV2c, SnmpV3, TagBase
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,18 @@ def convert(tag: TagBase, value: Any) -> Value | None:
     return coerce(raw, tag.data_type)
 
 
+def credentials(sec: SnmpV2c | SnmpV3) -> Any:
+    """pysnmp auth data for a v2c community or a v3 user (also used by hub-commission)."""
+    if isinstance(sec, SnmpV2c):
+        return snmp.CommunityData(_env(sec.community_env), mpModel=1)
+    return snmp.UsmUserData(
+        sec.username,
+        authKey=_env(sec.auth_key_env) if sec.auth_key_env else None,
+        privKey=_env(sec.priv_key_env) if sec.priv_key_env else None,
+        authProtocol=AUTH[sec.auth_protocol] if sec.auth_protocol else snmp.usmNoAuthProtocol,
+        privProtocol=PRIV[sec.priv_protocol] if sec.priv_protocol else snmp.usmNoPrivProtocol)
+
+
 class SnmpDriver(Driver[SnmpDevice]):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
@@ -78,20 +90,9 @@ class SnmpDriver(Driver[SnmpDevice]):
         self._target: Any = None
         self._auth: Any = None
 
-    def _credentials(self) -> Any:
-        sec = self.device.connection.security
-        if isinstance(sec, SnmpV2c):
-            return snmp.CommunityData(_env(sec.community_env), mpModel=1)
-        return snmp.UsmUserData(
-            sec.username,
-            authKey=_env(sec.auth_key_env) if sec.auth_key_env else None,
-            privKey=_env(sec.priv_key_env) if sec.priv_key_env else None,
-            authProtocol=AUTH[sec.auth_protocol] if sec.auth_protocol else snmp.usmNoAuthProtocol,
-            privProtocol=PRIV[sec.priv_protocol] if sec.priv_protocol else snmp.usmNoPrivProtocol)
-
     async def _connect(self) -> None:
         c = self.device.connection
-        self._auth = self._credentials()
+        self._auth = credentials(c.security)
         self._engine = snmp.SnmpEngine()
         self._target = await snmp.UdpTransportTarget.create(
             (c.host, c.port), timeout=c.timeout_ms / 1000, retries=c.retries)

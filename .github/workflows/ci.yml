@@ -1,0 +1,115 @@
+# CI for the Industrial IoT Data Hub (phase 6). The same checks run locally with
+# `python scripts/check.py`. No hardware and no external database: tests use the simulators and
+# a throw-away PostgreSQL (pgserver).
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * 1"          # weekly: dependency audit + load test catch new advisories
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install "ruff>=0.6" "bandit>=1.7" "pip-audit>=2.7"
+      - name: Lint
+        run: ruff check hub backend simulators tests scripts
+      - name: Static security analysis
+        run: bandit -q -c pyproject.toml -r hub backend simulators
+      - name: Known vulnerabilities in the shipped dependencies
+        run: pip-audit --progress-spinner off --no-deps --disable-pip -r requirements.lock
+
+  test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - name: Install (locked runtime versions + dev tools)
+        run: |
+          pip install -r requirements.lock
+          pip install -e ".[dev]"
+      - name: requirements.lock matches pyproject.toml
+        run: python scripts/lock.py --check
+        if: runner.os == 'Windows'      # the lock is generated on Windows (the plant platform)
+      - name: Configuration of the repository
+        run: python -m hub.validate_config --config-dir config
+      - name: Tests
+        run: python -m pytest -q -p no:cacheprovider
+
+  loadtest:
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e ".[dev]"
+      - name: 200 devices x 20 tags for 2 minutes
+        run: python -m simulators.loadtest --devices 200 --tags 20 --seconds 120 --warmup 30 --json loadtest.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest
+          path: loadtest.json
+
+  package:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Offline Windows bundle (program + wheelhouse + installer)
+        shell: pwsh
+        run: ./scripts/windows/build-bundle.ps1 -Out release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle
+          path: release/*.zip
+
+  docker:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t iot-data-hub:${{ github.sha }} .
+      - name: Smoke test (configuration check inside the image)
+        run: docker run --rm iot-data-hub:${{ github.sha }} python -m hub.validate_config --config-dir /app/config

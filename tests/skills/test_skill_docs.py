@@ -10,7 +10,8 @@ import yaml
 
 from hub.models import DEVICE_ADAPTER, PROTOCOLS, DataType
 
-REFERENCES = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "add-device" / "references"
+REFERENCES = (Path(__file__).resolve().parents[2] / ".claude" / "skills" / "add-device"
+              / "references")
 CHEATSHEET = (REFERENCES / "schema-cheatsheet.md").read_text(encoding="utf-8")
 
 

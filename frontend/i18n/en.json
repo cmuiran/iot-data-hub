@@ -180,7 +180,10 @@
   "retention": "Old data removed",
   "rollup": "Hourly summary",
   "failover": "Failover",
-  "audit_anchor": "Audit chain anchor"
+  "audit_anchor": "Audit chain anchor",
+  "restore_ok": "Restore test passed",
+  "restore_failed": "Restore test failed",
+  "upgrade": "Upgrade"
  },
  "sites": {
   "kish": "Kish"
@@ -923,7 +926,23 @@
   "writes_off": "read-only",
   "clients": "Connected clients",
   "requests": "Counters",
-  "no_modbus_server": "Not configured (config/modbus_server.yaml)"
+  "no_modbus_server": "Not configured (config/modbus_server.yaml)",
+  "health": "Hub health",
+  "check": "Check",
+  "check_now": "Check now",
+  "checked": "Checked",
+  "not_checked": "Not checked yet",
+  "check_database": "Database",
+  "check_disk": "Disk",
+  "check_storage": "Storage queue",
+  "check_loop": "Responsiveness",
+  "check_backup": "Backups",
+  "check_restore": "Restore test",
+  "check_clock": "Clock",
+  "health_ok": "OK",
+  "health_warning": "Warning",
+  "health_critical": "Critical",
+  "health_unknown": "Not available"
  },
  "account": {
   "title": "My account",

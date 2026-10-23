@@ -22,13 +22,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from hub.drivers.base import AnyDevice, DeviceStatus
 from hub.models import (
+    INTEGER_RANGES,
+    QUALITY_CODES,
     DataType,
     HttpTag,
-    INTEGER_RANGES,
     ModbusTag,
     MqttTag,
     OpcUaTag,
-    QUALITY_CODES,
     S7Tag,
     Sample,
     SnmpTag,
@@ -49,6 +49,9 @@ from hub.storage.records import (
 )
 
 log = logging.getLogger(__name__)
+audit_log = logging.getLogger("hub.audit")  # copy of every audit row for the SIEM
+_SECURITY_EVENTS = frozenset({"login_failed", "login_throttled", "locked", "mfa_failed",
+                              "network_denied", "user_disabled", "mfa_reset"})
 
 _QUALITY_BY_CODE = {v: k for k, v in QUALITY_CODES.items()}
 _INTEGER_TYPES = frozenset(INTEGER_RANGES)
@@ -80,6 +83,15 @@ def _split(value: object) -> tuple[float | None, bool | None, str | None]:
     if isinstance(value, str):
         return None, None, value
     return float(value), None, None  # type: ignore[arg-type]
+
+
+_UNNEST = ("unnest(%s::integer[], %s::timestamptz[], %s::float8[], %s::boolean[], %s::text[], "
+           "%s::smallint[])")
+
+
+def _columns(rows: Sequence[tuple]) -> tuple[list[Any], ...]:
+    """Sample rows (tag_id, ts, num, bool, text, quality) as six arrays for _UNNEST."""
+    return tuple(list(column) for column in zip(*rows, strict=True)) if rows else ([],) * 6
 
 
 def _join(data_type: str, num: float | None, flag: bool | None, text: str | None) -> Any:
@@ -208,22 +220,25 @@ class PostgresStore:
             rows.append((tag_id, s.timestamp, num, flag, text, QUALITY_CODES[s.quality]))
         if not rows:
             return 0
+        latest: dict[int, tuple] = {}
+        for row in rows:
+            if row[0] not in latest or row[1] >= latest[row[0]][1]:
+                latest[row[0]] = row
+        # one statement per table and batch (arrays + unnest): executemany costs a round trip
+        # per row, which made the event loop the bottleneck above ~2000 samples/s.
+        # _UNNEST is a constant; every value is a parameter.
         async with self._conn() as conn, conn.transaction():
-            async with conn.cursor() as cur:
-                await cur.executemany(
-                    "INSERT INTO samples (tag_id, ts, value_num, value_bool, value_text, quality)"
-                    " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (tag_id, ts) DO NOTHING", rows)
-                latest: dict[int, tuple] = {}
-                for row in rows:
-                    if row[0] not in latest or row[1] >= latest[row[0]][1]:
-                        latest[row[0]] = row
-                await cur.executemany(
-                    "INSERT INTO tag_latest (tag_id, ts, value_num, value_bool, value_text, "
-                    "quality) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (tag_id) DO UPDATE SET "
-                    "ts=EXCLUDED.ts, value_num=EXCLUDED.value_num, "
-                    "value_bool=EXCLUDED.value_bool, value_text=EXCLUDED.value_text, "
-                    "quality=EXCLUDED.quality WHERE tag_latest.ts <= EXCLUDED.ts",
-                    list(latest.values()))
+            await conn.execute(
+                "INSERT INTO samples (tag_id, ts, value_num, value_bool, value_text, quality) "
+                f"SELECT * FROM {_UNNEST} ON CONFLICT (tag_id, ts) DO NOTHING",  # nosec B608
+                _columns(rows))
+            await conn.execute(
+                "INSERT INTO tag_latest (tag_id, ts, value_num, value_bool, value_text, quality) "
+                f"SELECT * FROM {_UNNEST} ON CONFLICT (tag_id) DO UPDATE SET "  # nosec B608
+                "ts=EXCLUDED.ts, value_num=EXCLUDED.value_num, "
+                "value_bool=EXCLUDED.value_bool, value_text=EXCLUDED.value_text, "
+                "quality=EXCLUDED.quality WHERE tag_latest.ts <= EXCLUDED.ts",
+                _columns(list(latest.values())))
         return len(rows)
 
     async def latest(self, tag_paths: Iterable[str] | None = None) -> list[LatestValue]:
@@ -321,7 +336,8 @@ class PostgresStore:
                 " UNION ALL"
                 " SELECT date_bin('1 hour', ts, %(origin)s), avg(value_num), min(value_num),"
                 " max(value_num),"
-                " (array_agg(value_num ORDER BY ts))[1], (array_agg(value_num ORDER BY ts DESC))[1],"
+                " (array_agg(value_num ORDER BY ts))[1],"
+                " (array_agg(value_num ORDER BY ts DESC))[1],"
                 " count(*) FROM samples WHERE tag_id=%(id)s AND quality = 0"
                 " AND value_num IS NOT NULL AND ts >= %(c)s AND ts < %(e)s"
                 " GROUP BY 1 ORDER BY 1",
@@ -332,16 +348,25 @@ class PostgresStore:
     # --- device status ------------------------------------------------------------------------
 
     async def upsert_device_status(self, status: DeviceStatus) -> None:
+        await self.upsert_device_statuses([status])
+
+    async def upsert_device_statuses(self, statuses: Sequence[DeviceStatus]) -> None:
+        """All changed device states in one statement (the hub flushes them every second)."""
+        if not statuses:
+            return
+        columns = ([s.device_id for s in statuses], [str(s.state) for s in statuses],
+                   [s.last_seen for s in statuses], [s.last_error for s in statuses],
+                   [s.last_error_at for s in statuses])
         async with self._conn() as conn:
             await conn.execute(
                 "INSERT INTO device_status (device_id, state, last_seen, last_error, "
-                "last_error_at, updated_at) VALUES (%s,%s,%s,%s,%s,now()) "
+                "last_error_at, updated_at) SELECT d, s, ls, le, lea, now() FROM "
+                "unnest(%s::text[], %s::text[], %s::timestamptz[], %s::text[], "
+                "%s::timestamptz[]) AS u(d, s, ls, le, lea) "
                 "ON CONFLICT (device_id) DO UPDATE SET state=EXCLUDED.state, "
                 "last_seen=coalesce(EXCLUDED.last_seen, device_status.last_seen), "
                 "last_error=EXCLUDED.last_error, last_error_at=EXCLUDED.last_error_at, "
-                "updated_at=now()",
-                (status.device_id, str(status.state), status.last_seen, status.last_error,
-                 status.last_error_at))
+                "updated_at=now()", columns)
 
     async def device_statuses(self) -> list[DeviceStatusRecord]:
         async with self._conn() as conn:
@@ -393,7 +418,8 @@ class PostgresStore:
         values = [Jsonb(v) if isinstance(v, list | dict) else v for v in fields.values()]
         async with self._conn() as conn:
             row = await (await conn.execute(
-                f"UPDATE users SET {assignments} WHERE user_id=%s RETURNING *",  # noqa: S608
+                # column names checked against _USER_FIELDS above; values are parameters
+                f"UPDATE users SET {assignments} WHERE user_id=%s RETURNING *",  # nosec B608
                 (*values, user_id))).fetchone()
         return UserRecord.model_validate(row) if row else None
 
@@ -539,16 +565,27 @@ class PostgresStore:
                               previous_value: object = None, readback_value: object = None,
                               confirmed_by: int | None = None, reason: str | None = None) -> None:
         tag_id = self._tag_ids.get(tag_path) or (await self.tags())[tag_path].tag_id
-        async with self._conn() as conn:
-            await conn.execute(
-                "INSERT INTO write_audit (request_id, phase, user_id, username, client_addr, "
-                "tag_id, tag_path, requested_value, previous_value, readback_value, "
-                "confirmed_by, result, reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (request_id, phase, user_id, username, client_addr, tag_id, tag_path,
-                 encode_value(requested_value),
-                 None if previous_value is None else encode_value(previous_value),
-                 None if readback_value is None else encode_value(readback_value),
-                 confirmed_by, result, reason))
+        fields = {"table": "write_audit", "request_id": str(request_id), "phase": phase,
+                  "user": username, "client": client_addr, "tag": tag_path,
+                  "value": requested_value, "previous": previous_value,
+                  "readback": readback_value, "result": result, "reason": reason}
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO write_audit (request_id, phase, user_id, username, client_addr, "
+                    "tag_id, tag_path, requested_value, previous_value, readback_value, "
+                    "confirmed_by, result, reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (request_id, phase, user_id, username, client_addr, tag_id, tag_path,
+                     encode_value(requested_value),
+                     None if previous_value is None else encode_value(previous_value),
+                     None if readback_value is None else encode_value(readback_value),
+                     confirmed_by, result, reason))
+        except Exception:
+            audit_log.error("audit row NOT stored: write %s %s by %s", phase, tag_path, username,
+                            extra={"audit": fields})
+            raise
+        audit_log.info("write %s %s=%s by %s: %s", phase, tag_path, requested_value, username,
+                       result, extra={"audit": fields})
 
     async def list_write_audit(self, *, tag_path: str | None = None, user_id: int | None = None,
                                request_id: UUID | None = None, since: datetime | None = None,
@@ -566,18 +603,28 @@ class PostgresStore:
             rows = await (await conn.execute(
                 "SELECT id, ts, request_id, phase, user_id, username, host(client_addr) AS "
                 "client_addr, tag_path, requested_value, previous_value, readback_value, "
-                f"confirmed_by, result, reason FROM write_audit WHERE {' AND '.join(where)} "  # noqa: S608
+                f"confirmed_by, result, reason FROM write_audit WHERE {' AND '.join(where)} "  # nosec B608
                 "ORDER BY id DESC LIMIT %s", (*params, limit))).fetchall()
         return [WriteAuditRecord.model_validate(r) for r in rows]
 
     async def add_auth_audit(self, event: str, username: str, *, user_id: int | None = None,
                              actor_id: int | None = None, client_addr: str | None = None,
                              detail: dict[str, Any] | None = None) -> None:
-        async with self._conn() as conn:
-            await conn.execute(
-                "INSERT INTO auth_audit (event, username, user_id, actor_id, client_addr, detail)"
-                " VALUES (%s,%s,%s,%s,%s,%s)",
-                (event, username, user_id, actor_id, client_addr, Jsonb(detail or {})))
+        fields = {"table": "auth_audit", "event": event, "user": username, "user_id": user_id,
+                  "actor_id": actor_id, "client": client_addr, "detail": detail or {}}
+        try:
+            async with self._conn() as conn:
+                await conn.execute(
+                    "INSERT INTO auth_audit (event, username, user_id, actor_id, client_addr, "
+                    "detail) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (event, username, user_id, actor_id, client_addr, Jsonb(detail or {})))
+        except Exception:
+            audit_log.error("audit row NOT stored: %s %s", event, username,
+                            extra={"audit": fields})
+            raise
+        level = logging.WARNING if event in _SECURITY_EVENTS else logging.INFO
+        audit_log.log(level, "%s %s%s", event, username,
+                      f" from {client_addr}" if client_addr else "", extra={"audit": fields})
 
     async def list_auth_audit(self, *, event: str | None = None, limit: int = 200
                               ) -> list[AuthAuditRecord]:
@@ -872,7 +919,8 @@ class PostgresStore:
 
     async def last_rollup(self) -> datetime | None:
         async with self._conn() as conn:
-            row = await (await conn.execute("SELECT max(bucket) AS b FROM samples_hourly")).fetchone()
+            cur = await conn.execute("SELECT max(bucket) AS b FROM samples_hourly")
+            row = await cur.fetchone()
         return row["b"]
 
     async def oldest_sample(self) -> datetime | None:
@@ -903,7 +951,8 @@ class PostgresStore:
     async def add_event(self, kind: str, node_id: str | None,
                          detail: dict[str, Any]) -> None:
         async with self._conn() as conn:
-            await conn.execute("INSERT INTO system_events (kind, node_id, detail) VALUES (%s,%s,%s)",
+            await conn.execute("INSERT INTO system_events (kind, node_id, detail) "
+                               "VALUES (%s,%s,%s)",
                                (kind, node_id, Jsonb(detail)))
 
     async def events(self, kind: str | None, limit: int) -> list[dict[str, Any]]:
@@ -920,3 +969,9 @@ class PostgresStore:
         async with self._conn() as conn:
             await conn.execute("SELECT 1")
         return True
+
+    async def server_time(self) -> datetime:
+        """The database server's clock (for the clock-skew health check)."""
+        async with self._conn() as conn:
+            row = await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone()
+        return row["now"]  # type: ignore[index]

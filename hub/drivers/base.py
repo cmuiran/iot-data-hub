@@ -99,7 +99,7 @@ class Backoff:
         self._current = self.initial_s if self._current == 0 else min(
             self._current * self.factor, self.max_s
         )
-        return self._current * random.uniform(0.8, 1.2)
+        return self._current * random.uniform(0.8, 1.2)  # nosec B311  # jitter, not crypto
 
     def reset(self) -> None:
         self._current = 0.0

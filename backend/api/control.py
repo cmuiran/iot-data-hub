@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
 
 from backend.control import WriteResult
 from backend.deps import ServicesDep, client_addr, require
+from backend.errors import NotFound
 from backend.rbac import Principal, split_path
 from hub.storage.records import PendingWrite
 
@@ -37,10 +38,19 @@ class PolicyOut(BaseModel):
     interlocks: list[dict[str, Any]]
 
 
+def _visible(p: Principal, tag_path: str) -> bool:
+    site, area, _, _ = split_path(tag_path)
+    return p.can("data.read", site, area)
+
+
 @router.post("/write", response_model=WriteResult)
 async def write(body: WriteIn, request: Request, svc: ServicesDep, p: Writer) -> WriteResult:
-    return await svc.control.request_write(p, body.tag, body.value, body.reason,
-                                           client_addr(request))
+    result = await svc.control.request_write(p, body.tag, body.value, body.reason,
+                                             client_addr(request))
+    # a tag the user cannot see answers like an unknown one (the attempt is audited all the same)
+    if result.result == "rejected_rbac" and not _visible(p, body.tag):
+        raise NotFound(f"unknown tag {body.tag}")
+    return result
 
 
 @router.get("/pending", response_model=list[PendingWrite])
@@ -68,6 +78,8 @@ async def reject(request_id: UUID, body: RejectIn, request: Request, svc: Servic
 @router.get("/policy/{tag_path}", response_model=PolicyOut)
 async def policy(tag_path: str, svc: ServicesDep, p: Writer) -> PolicyOut:
     svc.control.tag_for(tag_path)  # 404 for unknown tags
+    if not _visible(p, tag_path):
+        raise NotFound(f"unknown tag {tag_path}")
     pol = svc.control.control.policy_for(tag_path)
     device, tag = svc.hub.tags[tag_path]
     enabled = (svc.settings.control_enabled and device.enabled and str(tag.access) == "read_write")

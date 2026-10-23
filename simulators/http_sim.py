@@ -42,7 +42,8 @@ class SimulatedHttpDevice:
     def __init__(self, device: HttpDevice, *, auth: dict[str, str] | None = None) -> None:
         self.device = device
         self.values: dict[str, Value | None] = {t.name: _initial(t) for t in device.tags}
-        self.auth = auth or {}          # {"basic": "user:pw"} | {"bearer": tok} | {"header": (n, v)}
+        # {"basic": "user:pw"} | {"bearer": tok} | {"header": (n, v)}
+        self.auth = auth or {}
         self.status = 200
         self.garbage = False
         self.requests = 0

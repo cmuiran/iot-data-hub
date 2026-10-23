@@ -21,6 +21,14 @@ Reply in the user's language (Persian or English), but everything written to fil
 
 ## 1. Gather inputs — ask only for what is missing
 
+If the device is reachable but the user has no register map / node list / payload sample, the
+read-only discovery commands produce one, with `--yaml` tag suggestions to start from (rename them,
+add units and limits; never keep a suggested name like `value` or `oid_1_2_0`):
+`hub-commission opcua-browse --endpoint opc.tcp://<host>:4840 --yaml`,
+`mqtt-listen --broker <broker_id> --topic "<prefix>/#" --yaml`, `http-get --url <url> --yaml`,
+`snmp-walk --host <host> --community-env <VAR> --oid <subtree> --yaml`, `modbus-scan --host <host>`
+(unit ids). They never write to the device.
+
 Identify the protocol from the input (register map → `modbus_tcp`, or `modbus_rtu` when the hub itself is on the RS-485 line: a COM/USB port or an RFC 2217 serial server; JSON payload/topic → `mqtt`; NodeIds/endpoint → `opcua`; Siemens addresses like `DB1.DBD0`, `M10.0` or a TIA Portal DB → `s7` (S7-300/400/1200/1500 without OPC UA); a REST/JSON URL → `http`; OIDs, MIB, UPS/PDU/switch → `snmp`). Ask if it is genuinely unclear. Then work out which of these are still unknown and ask for those in **one** message (use AskUserQuestion when a choice list fits; plain text for free-form values like IPs). Do not re-ask things already stated or visible in the pasted material.
 
 | Always | `device_id`, display `name`, `site`, `area` |
@@ -102,8 +110,8 @@ Fix every ERROR and rerun until there are none. Typical causes: address overlap 
 ## 6. Alarms, control policy, simulation
 
 - Simulation needs no extra work: `hub-sim` builds simulators straight from the device YAML. Suggest
-  `hub-sim --config-dir config --out .sim` + `hub --config-dir .sim/config` to see the new tags
-  decode before touching hardware.
+  `hub-sim --config-dir config --out .sim` + `hub-commission --config-dir .sim/config --env-file
+  .sim/sim.env read <device_id>` to see the new tags decode before touching hardware.
 - If the user mentions limits ("alarm above 35 °C", "warn when the breaker opens"), add a rule to
   `config/alarms.yaml` (schema `AlarmRule`: `hi`/`hihi`/`lo`/`lolo` for numbers, `equals` for
   bools, `deadband`, `delay_s`, `severity`); never invent limits.
@@ -113,7 +121,7 @@ Fix every ERROR and rerun until there are none. Typical causes: address overlap 
 
 ## 7. Finish with a short report
 
-One table of tags created (name, address/path/NodeId, type, unit, access), then bullet lists for **TODO / unknowns**, **Assumptions** (every default you applied without being told: broker, device_id, display name, word order left at big/big, inferred units/types, `enabled: false` holds, a new site/area), **Warnings** (ambiguity decisions — addressing base, word order, bit numbering not yet checked against a live value — writable tags, collisions, unset env vars) and the **Next step** — test the connection with QModMaster (Modbus; compare a known value to check addressing and word order), MQTT Explorer (check topic and payload against `json_path`s), or UaExpert (check NodeIds and security policy), then enable the device if it was written with `enabled: false`. Keep it short; the YAML is the deliverable.
+One table of tags created (name, address/path/NodeId, type, unit, access), then bullet lists for **TODO / unknowns**, **Assumptions** (every default you applied without being told: broker, device_id, display name, word order left at big/big, inferred units/types, `enabled: false` holds, a new site/area), **Warnings** (ambiguity decisions — addressing base, word order, bit numbering not yet checked against a live value — writable tags, collisions, unset env vars) and the **Next step** — verify against the live device with the hub's read-only `hub-commission` (docs/fa/commissioning.md): `hub-commission read <device_id> --seconds 60 --out sat/<device_id>.md` reads every tag through the real driver (disabled devices too) and flags bad quality and implausible numbers; when a value is off, `modbus-probe --device <id> --address <a> --expect <value on the display>` (or `s7-dump ... --expect`) finds the word order, addressing base and scale; `opcua-browse --device <id>`, `mqtt-listen --device <id>`, `http-get --device <id>` and `snmp-walk --device <id>` show what the device really offers. Then enable the device if it was written with `enabled: false`. Keep it short; the YAML is the deliverable.
 
 ## Bulk onboarding with Excel
 

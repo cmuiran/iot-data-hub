@@ -180,7 +180,10 @@
   "retention": "حذف داده قدیمی",
   "rollup": "خلاصه ساعتی",
   "failover": "جابه‌جایی گره",
-  "audit_anchor": "لنگر زنجیره ممیزی"
+  "audit_anchor": "لنگر زنجیره ممیزی",
+  "restore_ok": "آزمون بازیابی موفق",
+  "restore_failed": "آزمون بازیابی ناموفق",
+  "upgrade": "ارتقا"
  },
  "sites": {
   "kish": "کیش"
@@ -923,7 +926,23 @@
   "writes_off": "فقط خواندنی",
   "clients": "کلاینت‌های متصل",
   "requests": "شمارنده‌ها",
-  "no_modbus_server": "تنظیم نشده (config/modbus_server.yaml)"
+  "no_modbus_server": "تنظیم نشده (config/modbus_server.yaml)",
+  "health": "سلامت هاب",
+  "check": "بررسی",
+  "check_now": "بررسی اکنون",
+  "checked": "بررسی‌شده",
+  "not_checked": "هنوز بررسی نشده",
+  "check_database": "پایگاه داده",
+  "check_disk": "دیسک",
+  "check_storage": "صف ذخیره‌سازی",
+  "check_loop": "پاسخ‌گویی",
+  "check_backup": "پشتیبان‌گیری",
+  "check_restore": "آزمون بازیابی",
+  "check_clock": "ساعت سرور",
+  "health_ok": "سالم",
+  "health_warning": "هشدار",
+  "health_critical": "بحرانی",
+  "health_unknown": "نامشخص"
  },
  "account": {
   "title": "حساب من",

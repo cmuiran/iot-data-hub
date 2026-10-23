@@ -23,9 +23,9 @@ from asyncua.crypto import security_policies
 
 from hub.codec import CodecError, Value, coerce
 from hub.drivers.base import Driver, DriverError
-from hub.pki import application_uri
 from hub.models import (
     DataType,
+    OpcUaConnection,
     OpcUaDevice,
     OpcUaTag,
     Quality,
@@ -34,6 +34,7 @@ from hub.models import (
     TagBase,
     UsernameAuth,
 )
+from hub.pki import application_uri
 
 log = logging.getLogger(__name__)
 for _name in ("asyncua", "asyncua.client.ua_client", "asyncua.common.subscription"):
@@ -82,6 +83,31 @@ def _env(name: str | None, what: str) -> str:
     return value
 
 
+async def open_client(c: OpcUaConnection) -> Client:
+    """A connected client with the connection's security and sign-in (also used by
+    hub-commission)."""
+    client = Client(c.endpoint_url, timeout=c.timeout_ms / 1000)
+    if isinstance(c.auth, UsernameAuth):
+        client.set_user(_env(c.auth.username_env, "OPC UA username"))
+        client.set_password(_env(c.auth.password_env, "OPC UA password"))
+    if c.security_policy is not SecurityPolicy.NONE:
+        cert = _env(c.client_certificate_env, "client certificate")
+        uri = application_uri(cert)
+        if uri:  # servers compare it with the certificate's subjectAltName
+            client.application_uri = uri
+        await client.set_security(
+            _POLICIES[c.security_policy],
+            certificate=cert,
+            private_key=_env(c.client_private_key_env, "client private key"),
+            mode=_MODES[c.security_mode],
+        )
+    try:
+        await client.connect()
+    except (OSError, TimeoutError, ua.UaError) as exc:
+        raise DriverError(f"cannot connect to {c.endpoint_url}: {exc}") from exc
+    return client
+
+
 class _Handler:
     """asyncua calls this for every data change; hand it to the driver's queue."""
 
@@ -106,27 +132,7 @@ class OpcUaDriver(Driver[OpcUaDevice]):
         self._queue: asyncio.Queue[tuple[Any, ua.DataValue]] = asyncio.Queue()
 
     async def _connect(self) -> None:
-        c = self.device.connection
-        client = Client(c.endpoint_url, timeout=c.timeout_ms / 1000)
-        if isinstance(c.auth, UsernameAuth):
-            client.set_user(_env(c.auth.username_env, "OPC UA username"))
-            client.set_password(_env(c.auth.password_env, "OPC UA password"))
-        if c.security_policy is not SecurityPolicy.NONE:
-            cert = _env(c.client_certificate_env, "client certificate")
-            uri = application_uri(cert)
-            if uri:  # servers compare it with the certificate's subjectAltName
-                client.application_uri = uri
-            await client.set_security(
-                _POLICIES[c.security_policy],
-                certificate=cert,
-                private_key=_env(c.client_private_key_env, "client private key"),
-                mode=_MODES[c.security_mode],
-            )
-        try:
-            await client.connect()
-        except (OSError, TimeoutError, ua.UaError) as exc:
-            raise DriverError(f"cannot connect to {c.endpoint_url}: {exc}") from exc
-        self._client = client
+        self._client = await open_client(self.device.connection)
         await self._resolve_nodes()
         await self._subscribe()
 

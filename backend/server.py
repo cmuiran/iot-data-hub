@@ -63,9 +63,23 @@ async def serve(settings: Settings) -> int:
         print_report(report, sys.stderr)
         return 1
     assert settings.database_url
-    await asyncio.to_thread(migrate, settings.database_url, settings.db_timescale)  # type: ignore[arg-type]
+    from hub.storage.migrate import SchemaTooNew
+
+    try:
+        applied = await asyncio.to_thread(migrate, settings.database_url,
+                                          settings.db_timescale)  # type: ignore[arg-type]
+    except SchemaTooNew as exc:
+        log.error("%s", exc)
+        print(f"refusing to start: {exc}", file=sys.stderr)
+        return 1
     store = PostgresStore(settings.database_url)
     await store.open()
+    if applied:
+        from backend.api.system import VERSION
+
+        log.warning("database upgraded to %s by hub %s", applied[-1], VERSION)
+        await store.add_event("upgrade", settings.node_id, {"applied": applied,
+                                                            "version": VERSION})
     services = Services.build(settings, report, store)
     ha = None
     try:
@@ -131,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         updates["database_url"] = embedded_database(args.embedded_db)
     settings = settings.model_copy(update=updates)
-    configure_logging(args.log_level, settings.log_file, settings.log_max_mb, settings.log_backups)
+    configure_logging(args.log_level, settings.log_file, settings.log_max_mb, settings.log_backups,
+                      fmt=settings.log_format, syslog=settings.syslog,
+                      facility=settings.syslog_facility, node=settings.node_id)
     if not settings.database_url:
         print("set HUB_DATABASE_URL (or use --dev --embedded-db DIR)", file=sys.stderr)
         return 2

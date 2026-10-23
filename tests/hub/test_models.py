@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -8,13 +8,13 @@ from pydantic import ValidationError
 
 from hub.models import (
     DEVICE_ADAPTER,
+    QUALITY_CODES,
     Broker,
     ModbusDevice,
     ModbusTag,
     MqttConnection,
     MqttTag,
     OpcUaConnection,
-    QUALITY_CODES,
     OpcUaTag,
     Quality,
     Sample,
@@ -280,7 +280,7 @@ def test_mqtt_timestamp_invalid(extra: dict[str, Any], match: str) -> None:
     ],
 )
 def test_parse_device_timestamp(value: object, fmt: TimestampFormat) -> None:
-    assert parse_device_timestamp(value, fmt) == datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert parse_device_timestamp(value, fmt) == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(

@@ -252,3 +252,26 @@ async def test_missing_secret_and_test_message(store: Any, http_server: Any, smt
         await n.stop()
     assert by_status(await store.notification_log()) == {("ops_mail", "sent"): 1,
                                                          ("ops_tg", "failed"): 1}
+
+
+async def test_hub_admin_notify_test(http_server: Any, smtp: Any, tmp_path: Any,
+                                     monkeypatch: pytest.MonkeyPatch,
+                                     capsys: pytest.CaptureFixture[str]) -> None:
+    """Field test of the real channels before the hub runs: no database needed."""
+    import yaml
+
+    from backend import admin
+
+    base, cap = http_server
+    port, box = smtp
+    (tmp_path / "notifications.yaml").write_text(
+        yaml.safe_dump(config(base, port).model_dump(mode="json")), encoding="utf-8")
+    assert await admin._notify_test(tmp_path, ["ops_mail", "ops_tg"], "Asia/Tehran") == 0
+    out = capsys.readouterr().out
+    assert "ops_mail (email): sent" in out and "ops_tg (telegram): sent" in out
+    assert box.messages and any("sendMessage" in r["path"] for r in cap.requests)
+    monkeypatch.delenv("TEST_TG_TOKEN")
+    assert await admin._notify_test(tmp_path, [], "Asia/Tehran") == 1      # all channels
+    assert "ops_tg (telegram): FAILED - environment variable TEST_TG_TOKEN" in \
+        capsys.readouterr().out
+    assert await admin._notify_test(tmp_path, ["nope"], "Asia/Tehran") == 2

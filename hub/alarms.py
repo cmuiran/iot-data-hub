@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from hub.drivers.base import DeviceState, DeviceStatus
-from hub.models import AlarmRule, AlarmsFile, AlarmSeverity, Quality, Sample
+from hub.models import AlarmRule, AlarmSeverity, AlarmsFile, Quality, Sample
 
 log = logging.getLogger(__name__)
 

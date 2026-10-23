@@ -20,11 +20,19 @@ reference and operations: [docs/backend.md](docs/backend.md); dashboard: [docs/f
 | Integration | OPC UA server and Modbus TCP server for SCADA (writes via the safety layer), northbound MQTT to a central broker, Prometheus metrics | done |
 | Operations | Windows service (WinSW), rotating logs with redaction, active/standby HA | done |
 | Security hardening | HTTPS, MFA (TOTP), idle timeout, password history/expiry, network allowlist, rate limit, WebSocket origin check, encrypted backups, tamper-evident audit, certificate expiry alarms | done |
+| Operations | self-monitoring alarms (database, disk, backups, restore tests, clock/NTP, storage backlog, responsiveness), JSON logs and syslog/SIEM with an audit copy, automatic backup restore tests, versioned API `/api/v1`, upgrade check and Windows upgrade/rollback scripts | done |
+| Field commissioning | `hub-commission` read-only toolkit (per-device read report and SAT sheet, Modbus word-order/scale finder, unit-id scan, OPC UA browse, MQTT listen, SNMP walk, S7 dump, HTTP get, tag suggestions), `hub-admin notify-test`, Persian installation / commissioning / operator / admin / training guides (docs/fa) | done |
+| Productization | offline Windows bundle + installer, Docker/Compose (Linux), locked dependencies, GitHub Actions CI (Windows + Linux), ruff/bandit/pip-audit, 30 automated penetration checks, `hub-loadtest` (300 devices / 6000 tags at 1 s: no loss) | done |
 | Web dashboard (fa/en, RTL) | live overview, devices, alarms (horn, notifications), trends, reports, control with two-person confirmation, schedules, dashboard builder, users, configuration, audit, system; Jalali calendar; light/dark; phone layout | done |
 
 Not verified yet: real field hardware, TimescaleDB-specific parts (tests skip without it), the
 Windows service installation itself (needs an elevated shell and WinSW), real SMTP/Telegram/SMS
-providers (tested against local servers).
+providers (tested against local servers), the Docker image (no Docker on the development
+machine; it is built in CI), an independent penetration test (docs/security-assessment.md).
+The offline bundle was built (17 MB, 46 wheels) and rehearsed: `install.ps1 -NoService` with
+pip's index pointed at a dead address installed everything from the wheelhouse in 130 s,
+migrated an empty database, created the administrator; the installed hub answered healthy,
+the sign-in worked, the dashboard loaded and `/api/docs` was closed.
 
 ## Quick start (no hardware, no database install)
 
@@ -49,9 +57,12 @@ Then open http://127.0.0.1:8000/ and sign in (the API itself: http://127.0.0.1:8
 | Command | Purpose |
 |---|---|
 | `hub-api` | the backend: drivers, storage, alarms, control, HTTP/WebSocket API |
-| `hub-admin` | `migrate`, `create-admin`, `reset-password`, `unlock`, `list-users`, `backup`, `decrypt-backup`, `make-cert`, `make-tls-cert`, `reset-mfa`, `verify-audit`, `service-config` |
+| `hub-admin` | `migrate [--dry-run]`, `upgrade-check`, `create-admin`, `reset-password`, `unlock`, `list-users`, `backup`, `verify-backup`, `restore-backup`, `decrypt-backup`, `make-cert`, `make-tls-cert`, `reset-mfa`, `verify-audit`, `service-config`, `notify-test` |
+| `hub-commission` | read-only field commissioning: `read` (report + SAT sheet), `modbus-probe`, `modbus-scan`, `opcua-browse`, `mqtt-listen`, `snmp-walk`, `s7-dump`, `http-get` (with `--yaml` tag suggestions) |
 | `hub` | collector only: prints live values (commissioning), optional `--database-url` |
 | `hub-sim` | simulates every device of a config folder on 127.0.0.1 |
+| `hub-loadtest` | load test: N simulated devices × M tags against the real hub and database, report + JSON |
+| `python scripts/check.py` | the CI checks locally (lint, security scan, lock, audit, config, tests) |
 | `python -m hub.validate_config` | checks `config/` (devices, brokers, alarms, control) |
 
 ## Layout
@@ -63,9 +74,10 @@ backend/         FastAPI app, auth, RBAC, control-safety layer, server/admin CLI
 frontend/        web dashboard (served by hub-api at /): index.html, css/, js/, i18n/fa.json + en.json
 simulators/      Modbus TCP, MQTT broker + devices, OPC UA, S7 PLC, HTTP/JSON, SNMP agent; hub-sim
 db/migrations/   0001_core, 0002_timescale (optional), 0003_operations, 0004_security, 0005_protocols
-scripts/windows/ install-service.ps1 / uninstall-service.ps1 (WinSW)
-docs/            backend.md, frontend.md, device_catalog.xlsx
-tests/           unit, drivers, storage, api, e2e, frontend (600+ tests, no hardware needed)
+scripts/windows/ install.ps1, build-bundle.ps1, install-service.ps1 / uninstall-service.ps1 (WinSW), upgrade.ps1 / rollback.ps1
+scripts/         check.py (CI locally), lock.py (requirements.lock)
+docs/            backend.md, frontend.md, security-assessment.md, device_catalog.xlsx; fa/ Persian guides (install, commissioning + SAT, operator, admin, training)
+tests/           unit, drivers, storage, api (incl. pentest), e2e, frontend (690+ tests, no hardware needed)
 .claude/skills/  add-device: onboard devices from datasheets, payloads, Excel
 ```
 

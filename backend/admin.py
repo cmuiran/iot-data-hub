@@ -1,6 +1,9 @@
 """Administration from the command line (works when nobody can log in yet).
 
-    hub-admin migrate
+    hub-admin migrate [--dry-run]
+    hub-admin upgrade-check [--config-dir config]
+    hub-admin verify-backup <file> [--full]
+    hub-admin restore-backup <file> --yes
     hub-admin create-admin --username admin [--display-name "Administrator"]
     hub-admin reset-password <username>
     hub-admin unlock <username>
@@ -12,6 +15,7 @@
     hub-admin reset-mfa <username>
     hub-admin verify-audit
     hub-admin decrypt-backup <file.dump.enc> <file.dump>
+    hub-admin notify-test [channel ...] [--config-dir config]   (no database needed)
 
 Passwords are asked interactively (twice) or read from HUB_ADMIN_PASSWORD for automation.
 Database: HUB_DATABASE_URL, or ``--embedded-db DIR`` for the development database.
@@ -110,6 +114,49 @@ async def _verify_audit(url: str) -> int:
     return 1 if bad else 0
 
 
+class _NoLog:
+    """notify-test runs without a database: the result is printed instead of logged."""
+
+    async def add_notification_log(self, **_: object) -> None:
+        return None
+
+
+async def _notify_test(config_dir: Path, channels: list[str], timezone: str) -> int:
+    from backend.notifications import Notifier
+    from hub.config_loader import load_config
+    from hub.validate_config import print_report
+
+    report = load_config(config_dir)
+    if report.has_errors:
+        print_report(report, sys.stderr)
+        return 2
+    known = report.notifications.channels
+    if not known:
+        print(f"no channels in {config_dir / 'notifications.yaml'}", file=sys.stderr)
+        return 2
+    names = channels or sorted(known)
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        print(f"unknown channel(s): {', '.join(unknown)}; configured: {', '.join(sorted(known))}",
+              file=sys.stderr)
+        return 2
+    notifier = Notifier(report.notifications, _NoLog(), timezone=timezone,
+                        scope_of=lambda _: None)
+    await notifier.start()
+    failed = 0
+    try:
+        for name in names:
+            try:
+                await notifier.send_test(name)
+                print(f"{name} ({known[name].type}): sent - check that it arrived")
+            except Exception as exc:  # noqa: BLE001 - reported per channel
+                failed += 1
+                print(f"{name} ({known[name].type}): FAILED - {exc}")
+    finally:
+        await notifier.stop()
+    return 1 if failed else 0
+
+
 async def _list(url: str) -> int:
     async with PostgresStore(url, max_size=2) as store:
         for user in await store.list_users():
@@ -120,12 +167,81 @@ async def _list(url: str) -> int:
     return 0
 
 
+async def _last_backup(url: str) -> dict[str, object] | None:
+    async with PostgresStore(url, max_size=1) as store:
+        events = await store.events("backup_ok", 1)
+    return events[0] if events else None
+
+
+def _upgrade_check(url: str, config_dir: Path) -> int:
+    """Everything that must be true before installing a new version (see docs/backend.md)."""
+    import shutil
+    from datetime import UTC, datetime
+
+    from backend.api.system import VERSION
+    from hub.config_loader import load_config
+    from hub.maintenance import find_pg_tool
+    from hub.storage.migrate import status
+
+    problems: list[str] = []
+    print(f"hub version installed: {VERSION}")
+    state = status(url)
+    print(f"database schema: {len(state['applied'])} migration(s) applied"
+          + (f", pending: {', '.join(state['pending'])}" if state["pending"] else "")
+          + (f", optional not applied: {', '.join(state['skipped'])}" if state["skipped"] else ""))
+    if state["unknown"]:
+        problems.append(f"the database is NEWER than this version ({', '.join(state['unknown'])})")
+    report = load_config(config_dir)
+    errors = [i for i in report.issues if i.severity == "ERROR"]
+    print(f"configuration {config_dir}: {len(report.devices)} device(s), {len(errors)} error(s)")
+    if errors:
+        problems.append("the configuration has errors (python -m hub.validate_config)")
+    try:
+        for tool in ("pg_dump", "pg_restore"):
+            print(f"{tool}: {find_pg_tool(tool, os.environ.get('HUB_PG_DUMP'))}")
+    except FileNotFoundError as exc:
+        problems.append(str(exc))
+    if state["applied"]:
+        last = run(_last_backup(url))
+        if last is None:
+            problems.append("no backup recorded: run hub-admin backup before upgrading")
+        else:
+            age = datetime.now(UTC) - last["ts"]  # type: ignore[operator]
+            print(f"last backup: {last['detail'].get('file')} "  # type: ignore[union-attr]
+                  f"({age.total_seconds() / 3600:.1f} h ago)")
+            if age.total_seconds() > 24 * 3600:
+                problems.append("the last backup is older than 24 h: run hub-admin backup first")
+    usage = shutil.disk_usage(Path.cwd())
+    print(f"free disk space here: {usage.free / 1e9:.1f} GB")
+    if usage.free < 2e9:
+        problems.append("less than 2 GB free for the new version, backup and logs")
+    if problems:
+        print("\nNOT READY:")
+        for item in problems:
+            print(f"  - {item}")
+        return 1
+    print("\nready to upgrade (stop the service, install, start: see scripts/windows/upgrade.ps1)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     parser = argparse.ArgumentParser(prog="hub-admin")
     parser.add_argument("--embedded-db", type=Path, metavar="DIR")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("migrate")
+    mig = sub.add_parser("migrate")
+    mig.add_argument("--dry-run", action="store_true", help="only list pending migrations")
+    check = sub.add_parser("upgrade-check")
+    check.add_argument("--config-dir", type=Path,
+                       default=Path(os.environ.get("HUB_CONFIG_DIR", "config")))
+    verify = sub.add_parser("verify-backup")
+    verify.add_argument("file", type=Path)
+    verify.add_argument("--full", action="store_true",
+                        help="restore into a temporary database (needs CREATEDB) and check it")
+    restore = sub.add_parser("restore-backup")
+    restore.add_argument("file", type=Path)
+    restore.add_argument("--yes", action="store_true",
+                         help="confirm: the current database contents are replaced")
     create = sub.add_parser("create-admin")
     create.add_argument("--username", required=True)
     create.add_argument("--display-name", default="Administrator")
@@ -151,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
     cert.add_argument("--out", type=Path, default=Path(os.environ.get("HUB_PKI_DIR", "pki")))
     cert.add_argument("--uri")
     cert.add_argument("--host")
+    notify = sub.add_parser("notify-test", help="send a test message on notification channels")
+    notify.add_argument("channel", nargs="*", help="channel names (default: all)")
+    notify.add_argument("--config-dir", type=Path,
+                        default=Path(os.environ.get("HUB_CONFIG_DIR", "config")))
     service = sub.add_parser("service-config")
     service.add_argument("--out", type=Path, default=Path("scripts/windows/hub-api-service.xml"))
     service.add_argument("--account", help="run as this Windows account (default LocalSystem)")
@@ -183,6 +303,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"private key: {key_path} (keep it secret)")
         print(f"application URI: {application_uri(cert_path)}")
         return 0
+    if args.command == "notify-test":  # needs no database
+        return run(_notify_test(args.config_dir, args.channel,
+                                os.environ.get("HUB_TIMEZONE", "Asia/Tehran")))
     if args.command == "service-config":  # needs no database
         from backend.service import render_winsw_xml
 
@@ -200,7 +323,45 @@ def main(argv: list[str] | None = None) -> int:
         print("set HUB_DATABASE_URL or pass --embedded-db DIR", file=sys.stderr)
         return 2
     min_length = int(os.environ.get("HUB_PASSWORD_MIN_LENGTH", 10))
-    migrate(url, os.environ.get("HUB_DB_TIMESCALE", "auto"))  # type: ignore[arg-type]
+    # commands that must not change the schema
+    if args.command == "upgrade-check":
+        return _upgrade_check(url, args.config_dir)
+    if args.command == "migrate" and args.dry_run:
+        from hub.storage.migrate import status
+
+        state = status(url)
+        print(f"applied: {len(state['applied'])}; pending: {', '.join(state['pending']) or 'none'}")
+        if state["unknown"]:
+            print(f"database is NEWER than this version: {', '.join(state['unknown'])}",
+                  file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "verify-backup":
+        from hub.maintenance import check_backup_archive, restore_test
+
+        key = os.environ.get("HUB_DATA_KEY")
+        result = (restore_test(url, args.file, key, os.environ.get("HUB_PG_DUMP")) if args.full
+                  else check_backup_archive(args.file, key, os.environ.get("HUB_PG_DUMP")))
+        print(f"backup OK: {result}")
+        return 0
+    if args.command == "restore-backup":
+        from hub.maintenance import restore_backup
+
+        if not args.yes:
+            print("restore-backup replaces the whole database with the backup. Stop hub-api "
+                  "(the Windows service) first, then repeat with --yes.", file=sys.stderr)
+            return 2
+        restore_backup(url, args.file, os.environ.get("HUB_DATA_KEY"),
+                       os.environ.get("HUB_PG_DUMP"))
+        print(f"restored {args.file.name}; start hub-api (it applies newer migrations, if any)")
+        return 0
+    from hub.storage.migrate import SchemaTooNew
+
+    try:
+        migrate(url, os.environ.get("HUB_DB_TIMESCALE", "auto"))  # type: ignore[arg-type]
+    except SchemaTooNew as exc:
+        print(exc, file=sys.stderr)
+        return 1
     if args.command == "migrate":
         print("database is up to date")
         return 0

@@ -269,7 +269,9 @@ class HubOpcUaServer:
         service = server.iserver.attribute_service
         original = service.write
 
-        async def write(params: ua.WriteParameters, user: User = User(role=UserRole.Admin)
+        # same default as asyncua's AttributeService.write (its internal session)
+        async def write(params: ua.WriteParameters,
+                        user: User = User(role=UserRole.Admin),  # noqa: B008
                         ) -> list[ua.StatusCode]:
             if user.role is UserRole.Admin:  # the server's internal session
                 return await original(params, user=user)

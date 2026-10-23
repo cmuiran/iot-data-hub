@@ -1,6 +1,6 @@
 [project]
 name = "iot-data-hub"
-version = "0.4.0"
+version = "0.6.0"
 description = "Industrial IoT Data Hub"
 requires-python = ">=3.12"
 dependencies = [
@@ -31,13 +31,19 @@ dev = [
     "amqtt>=0.11",             # in-process MQTT broker for tests and the local simulator
     "pgserver>=0.1.4",         # throw-away PostgreSQL for the store tests (no install needed)
     "aiosmtpd>=1.4",           # local SMTP server for the e-mail notification tests
+    "ruff>=0.6",               # lint (CI and scripts/check.py)
+    "bandit>=1.7",             # static security analysis (CI)
+    "pip-audit>=2.7",          # known vulnerabilities in the dependencies (CI)
+    "psutil>=5.9",             # CPU/memory figures of hub-loadtest
 ]
 
 [project.scripts]
 hub = "hub.main:main"
+hub-commission = "hub.commission:main"
 hub-api = "backend.server:main"
 hub-sim = "simulators.run:main"
 hub-admin = "backend.admin:main"
+hub-loadtest = "simulators.loadtest:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -59,3 +65,27 @@ filterwarnings = [
     "ignore::DeprecationWarning:amqtt.*",
     "ignore::DeprecationWarning:asyncua.*",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["RadarWebConsole", ".claude/skills/*/evals", "_skill_staging", ".sim", ".preview"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I", "ASYNC"]
+ignore = [
+    "UP046",     # Generic[...] base classes read fine and keep mypy/pyright happy on 3.12
+    "ASYNC109",  # explicit timeout= parameters on helpers are deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests poll with sleep loops and run blocking helpers on purpose
+"tests/**" = ["ASYNC110", "ASYNC221", "ASYNC240", "B017"]
+"simulators/**" = ["ASYNC110"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "RadarWebConsole", "_skill_staging", ".sim", ".preview"]
+# Reviewed, project-wide (docs/security-assessment.md): asserts only state invariants after the
+# real checks; try/except/pass only in disconnect cleanup; subprocess runs pg_dump/pg_restore with
+# argument lists (no shell) from configured paths. Single findings use "# nosec <id> - reason".
+skips = ["B101", "B110", "B404", "B603"]

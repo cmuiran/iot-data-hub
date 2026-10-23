@@ -38,8 +38,8 @@ async def _seed(store: Any) -> None:
 
 async def test_rollup_and_retention(store: Any) -> None:
     await _seed(store)
-    m = Maintenance(store, MaintenanceSettings(retention_raw_days=1, timezone="UTC"), database_url=None,
-                    clock=lambda: NOW)
+    m = Maintenance(store, MaintenanceSettings(retention_raw_days=1, timezone="UTC"),
+                    database_url=None, clock=lambda: NOW)
     assert await m.run_rollup() > 0
     hist = await store.history(V, datetime(2026, 10, 7, tzinfo=UTC),
                                datetime(2026, 10, 8, tzinfo=UTC), max_points=24)
@@ -57,8 +57,8 @@ async def test_rollup_and_retention(store: Any) -> None:
 
 async def test_retention_never_deletes_unrolled_data(store: Any) -> None:
     await _seed(store)
-    m = Maintenance(store, MaintenanceSettings(retention_raw_days=1, timezone="UTC"), database_url=None,
-                    clock=lambda: NOW)
+    m = Maintenance(store, MaintenanceSettings(retention_raw_days=1, timezone="UTC"),
+                    database_url=None, clock=lambda: NOW)
     assert (await m.run_retention())["raw"] == 0      # no roll-up yet: keep everything
     assert await store.oldest_sample() is not None
 
@@ -85,7 +85,8 @@ async def test_backup_with_pg_dump(store: Any, database_url: str, tmp_path: Path
     listing = subprocess.run([restore, "--list", str(path)], capture_output=True, text=True,
                              check=True).stdout
     assert "TABLE DATA public samples" in listing and "write_audit" in listing
-    assert [e["kind"] for e in await store.events(None, 5)] == ["backup_ok"]
+    # every backup is read back right away (HUB_RESTORE_TEST=archive, the default)
+    assert [e["kind"] for e in await store.events(None, 5)] == ["restore_ok", "backup_ok"]
 
 
 async def test_backup_failure_is_recorded(store: Any, tmp_path: Path) -> None:
