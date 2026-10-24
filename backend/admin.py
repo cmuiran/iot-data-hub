@@ -75,6 +75,10 @@ async def _reset(url: str, username: str, min_length: int, unlock_only: bool) ->
                                        detail={"via": "hub-admin"})
             print(f"{username} unlocked")
             return 0
+        if user.auth_source == "ldap":
+            print(f"{username} signs in with Active Directory: change the password there",
+                  file=sys.stderr)
+            return 1
         await store.update_user(user.user_id,
                                 password_hash=hash_password(_password(username, min_length)),
                                 must_change_password=True, failed_logins=0, locked_until=None)

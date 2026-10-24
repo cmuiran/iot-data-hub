@@ -67,6 +67,7 @@ class UserOut(BaseModel):
     created_at: datetime
     roles: list[GrantOut]
     mfa_enabled: bool = False
+    auth_source: str = "local"          # ldap: password and roles come from the directory
 
 
 def _grant_out(g: RoleGrant) -> GrantOut:
@@ -86,6 +87,12 @@ async def _get(svc: ServicesDep, user_id: int) -> UserRecord:
     if user is None:
         raise NotFound("no such user")
     return user
+
+
+def _local_only(user: UserRecord, what: str) -> None:
+    if user.auth_source == "ldap":
+        raise Conflict(f"{user.username} signs in with Active Directory: {what} come from the "
+                       "directory", code="directory_account")
 
 
 async def _check_grant(svc: ServicesDep, grant: GrantIn) -> None:
@@ -167,6 +174,7 @@ async def update_user(user_id: int, body: UserPatch, request: Request, svc: Serv
 async def reset_password(user_id: int, body: PasswordReset, request: Request, svc: ServicesDep,
                          p: Admin) -> None:
     user = await _get(svc, user_id)
+    _local_only(user, "the password and its changes")
     await svc.auth.set_password(user, body.new_password, must_change=True)
     await svc.store.revoke_user_sessions(user_id)
     await svc.store.add_auth_audit("password_changed", user.username, user_id=user_id,
@@ -192,6 +200,7 @@ async def unlock(user_id: int, request: Request, svc: ServicesDep, p: Admin) -> 
 async def grant_role(user_id: int, body: GrantIn, request: Request, svc: ServicesDep,
                      p: Admin) -> GrantOut:
     user = await _get(svc, user_id)
+    _local_only(user, "roles (directory groups, config/ldap.yaml)")
     await _check_grant(svc, body)
     try:
         grant = await svc.store.grant_role(user_id, body.role, body.site, body.area, p.user_id)
@@ -207,6 +216,7 @@ async def grant_role(user_id: int, body: GrantIn, request: Request, svc: Service
 async def revoke_role(user_id: int, user_role_id: int, request: Request, svc: ServicesDep,
                       p: Admin) -> None:
     user = await _get(svc, user_id)
+    _local_only(user, "roles (directory groups, config/ldap.yaml)")
     grant = next((g for g in await svc.store.grants(user_id) if g.user_role_id == user_role_id),
                  None)
     if grant is None:

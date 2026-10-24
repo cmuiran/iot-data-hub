@@ -257,8 +257,10 @@ class HealthWatch:
         capacity = getattr(hub, "max_buffer", 200_000)
         dropped_now = stats.samples_dropped - (self._dropped_seen or 0)
         self._dropped_seen = stats.samples_dropped
+        spooled = getattr(stats, "spool_batches", 0)
         details = {"buffered": stats.buffered, "capacity": capacity,
-                   "dropped": stats.samples_dropped, "write_errors": stats.write_errors}
+                   "dropped": stats.samples_dropped, "write_errors": stats.write_errors,
+                   "spool_batches": spooled}
         if dropped_now > 0:
             message = (f"{dropped_now} samples were lost because the storage buffer was full "
                        "(database too slow or unreachable)")
@@ -266,6 +268,11 @@ class HealthWatch:
             return CheckResult("storage", "critical", message, details)
         if stats.buffered > capacity / 2:
             message = f"{stats.buffered} samples waiting for the database ({capacity} max)"
+            await self._raise("system:storage", AlarmSeverity.HIGH, message, now)
+            return CheckResult("storage", "warning", message, details)
+        if spooled:
+            message = (f"{spooled} batch(es) of samples wait on disk for the database "
+                       "(store & forward); they are written when it answers again")
             await self._raise("system:storage", AlarmSeverity.HIGH, message, now)
             return CheckResult("storage", "warning", message, details)
         if stats.buffered < capacity / 10:

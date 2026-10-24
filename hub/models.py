@@ -1485,6 +1485,74 @@ class NotificationsFile(_Strict):
 
 
 # --------------------------------------------------------------------------------------------
+# Directory sign-in (config/ldap.yaml)
+# --------------------------------------------------------------------------------------------
+
+HubRole = Literal["admin", "engineer", "operator", "viewer"]
+
+
+class LdapRoleMapping(_Strict):
+    """Members of ``group`` (its distinguished name) get ``role``, everywhere or limited to a
+    site / a site + area, like a role granted on the Users page."""
+
+    group: str = Field(min_length=3, max_length=500)
+    role: HubRole
+    site: Segment | None = None
+    area: Segment | None = None
+
+    @model_validator(mode="after")
+    def _check_scope(self) -> LdapRoleMapping:
+        if self.area is not None and self.site is None:
+            raise ValueError("area needs a site")
+        if "=" not in self.group:
+            raise ValueError(f"{self.group!r} is not a distinguished name (CN=...,OU=...,DC=...)")
+        return self
+
+
+class LdapFile(_Strict):
+    """Sign-in with Active Directory / LDAP. The hub looks the user up with a service account,
+    checks the password with a bind as that user, and takes the roles from the user's groups
+    (``mappings``; no mapped group = no access). Only encrypted connections: ``ldaps://`` or
+    ``ldap://`` with ``start_tls``. Local accounts keep working (e.g. when the directory is
+    down)."""
+
+    enabled: bool = True
+    url: str = Field(description="ldaps://dc1.kish.local:636 or ldap://dc1.kish.local:389")
+    start_tls: bool = False
+    ca_file_env: EnvVarName | None = Field(
+        default=None, description="variable holding the path of the company CA (PEM)")
+    bind_dn: str = Field(min_length=3, max_length=500, description="service account DN")
+    bind_password_env: EnvVarName
+    user_base: str = Field(min_length=3, max_length=500)
+    user_filter: str = Field(
+        default="(&(objectClass=user)(sAMAccountName={username}))", max_length=500)
+    group_base: str | None = Field(default=None, max_length=500)
+    nested_groups: bool = Field(default=True,
+                                description="Active Directory: count groups inside groups")
+    display_name_attribute: str = Field(default="displayName", max_length=64)
+    timeout_s: float = Field(default=5, ge=1, le=60)
+    mappings: list[LdapRoleMapping] = Field(min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        if not re.fullmatch(r"ldaps?://[A-Za-z0-9.\-]+(:\d{1,5})?/?", value):
+            raise ValueError(f"{value!r}: use ldaps://host[:port] or ldap://host[:port]")
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _check_security(self) -> LdapFile:
+        if self.url.startswith("ldap://") and not self.start_tls:
+            raise ValueError("ldap:// without start_tls would send passwords in clear text; "
+                             "use ldaps:// or start_tls: true")
+        if self.url.startswith("ldaps://") and self.start_tls:
+            raise ValueError("start_tls is for ldap:// URLs; ldaps:// is already encrypted")
+        if "{username}" not in self.user_filter:
+            raise ValueError("user_filter must contain {username}")
+        return self
+
+
+# --------------------------------------------------------------------------------------------
 # Control policy (config/control.yaml)
 # --------------------------------------------------------------------------------------------
 
@@ -1529,25 +1597,21 @@ class ControlFile(_Strict):
 # --------------------------------------------------------------------------------------------
 
 
-class NorthboundTarget(_Strict):
-    """Publishes ``<topic_prefix>/<site>/<area>/<device_id>/<tag>`` with
-    ``{"v": value, "ts": "...Z", "q": "good", "u": unit}`` when a value or its quality changes,
-    and at least every ``heartbeat_s``. ``<topic_prefix>/status`` (retained) says ``online`` /
-    ``offline`` (the broker sends ``offline`` as last will if the hub disappears).
-    Output only: nothing received on the broker is written to a device."""
+class _PublishTarget(_Strict):
+    """What every output target shares: which tags, how often, and store & forward."""
 
     name: Segment
-    broker_ref: Segment
-    topic_prefix: Annotated[str, AfterValidator(validate_topic_name)] = "hub"
     tags: list[str] = Field(default_factory=lambda: ["*"], min_length=1,
                             description="tag path patterns (* and ? wildcards)")
-    qos: Literal[0, 1] = 1
-    retain: bool = False
     heartbeat_s: int = Field(default=300, ge=5, le=86_400)
     min_interval_s: float = Field(default=0.0, ge=0, le=3600,
                                   description="at most one message per tag in this interval")
     queue_max: int = Field(default=10_000, ge=10, le=1_000_000,
-                           description="messages kept while the broker is unreachable")
+                           description="messages kept in memory while the target is unreachable")
+    store_and_forward: bool = Field(
+        default=True, description="beyond the memory queue, keep messages on disk (survives "
+        "restarts) and send them in order after the reconnect (needs HUB_SPOOL_DIR)")
+    spool_max_mb: int = Field(default=512, ge=1, le=1_000_000)
 
     @field_validator("tags")
     @classmethod
@@ -1558,8 +1622,67 @@ class NorthboundTarget(_Strict):
         return value
 
 
+class NorthboundTarget(_PublishTarget):
+    """Publishes ``<topic_prefix>/<site>/<area>/<device_id>/<tag>`` with
+    ``{"v": value, "ts": "...Z", "q": "good", "u": unit}`` when a value or its quality changes,
+    and at least every ``heartbeat_s``. ``<topic_prefix>/status`` (retained) says ``online`` /
+    ``offline`` (the broker sends ``offline`` as last will if the hub disappears).
+    Output only: nothing received on the broker is written to a device."""
+
+    broker_ref: Segment
+    topic_prefix: Annotated[str, AfterValidator(validate_topic_name)] = "hub"
+    qos: Literal[0, 1] = 1
+    retain: bool = False
+
+
+_KAFKA_SERVER_RE = re.compile(r"[A-Za-z0-9.\-]+:\d{1,5}")
+
+
+class KafkaTarget(_PublishTarget):
+    """Publishes tag values to an Apache Kafka topic: key = tag path (one tag stays in one
+    partition, in order), value = ``{"tag", "v", "ts", "q", "u", "node"}`` as JSON.
+    ``acks: all`` uses an idempotent producer (no duplicates on retries). Encrypted by
+    default (SASL_SSL or SSL); PLAINTEXT only with ``allow_plaintext``.
+    Output only: the hub never reads from Kafka."""
+
+    bootstrap_servers: list[str] = Field(min_length=1, max_length=20)
+    topic: str = Field(default="hub.samples", pattern=r"^[A-Za-z0-9._\-]{1,249}$")
+    security_protocol: Literal["SASL_SSL", "SSL", "PLAINTEXT"] = "SASL_SSL"
+    sasl_mechanism: Literal["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"] = "SCRAM-SHA-512"
+    username_env: EnvVarName | None = None
+    password_env: EnvVarName | None = None
+    ca_file_env: EnvVarName | None = None
+    client_certificate_env: EnvVarName | None = None
+    client_private_key_env: EnvVarName | None = None
+    allow_plaintext: bool = False
+    acks: Literal["all", 1] = "all"
+    compression: Literal["gzip", "none"] = "gzip"
+    linger_ms: int = Field(default=50, ge=0, le=10_000)
+
+    @field_validator("bootstrap_servers")
+    @classmethod
+    def _check_servers(cls, value: list[str]) -> list[str]:
+        for server in value:
+            if not _KAFKA_SERVER_RE.fullmatch(server):
+                raise ValueError(f"{server!r}: use host:port (e.g. kafka1.kish.local:9093)")
+        return value
+
+    @model_validator(mode="after")
+    def _check_security(self) -> KafkaTarget:
+        if self.security_protocol == "PLAINTEXT" and not self.allow_plaintext:
+            raise ValueError("PLAINTEXT sends values and credentials unencrypted; use SSL / "
+                             "SASL_SSL, or set allow_plaintext: true for a closed lab network")
+        if self.security_protocol == "SASL_SSL" and not (self.username_env
+                                                         and self.password_env):
+            raise ValueError("SASL_SSL needs username_env and password_env")
+        if (self.client_certificate_env is None) != (self.client_private_key_env is None):
+            raise ValueError("client_certificate_env and client_private_key_env go together")
+        return self
+
+
 class NorthboundFile(_Strict):
     targets: list[NorthboundTarget] = Field(default_factory=list)
+    kafka: list[KafkaTarget] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------------------------

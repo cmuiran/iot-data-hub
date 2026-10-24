@@ -24,6 +24,13 @@ def _frontend_dir(value: str | None) -> Path | None:
     return None if value.strip().lower() == "off" else Path(value)
 
 
+def _spool_dir(value: str | None) -> Path | None:
+    """HUB_SPOOL_DIR: unset = ./spool, "off" = no store & forward, else a directory."""
+    if value is None or value.strip() == "":
+        return Path("spool")
+    return None if value.strip().lower() == "off" else Path(value)
+
+
 def _list(value: str | None) -> list[str]:
     return [v.strip() for v in (value or "").split(",") if v.strip()]
 
@@ -102,6 +109,9 @@ class Settings(BaseModel):
     backup_max_age_hours: int = Field(default=26, ge=1, le=24 * 30)
     restore_test: Literal["off", "archive", "full"] = "archive"
     restore_test_days: int = Field(default=7, ge=1, le=365)
+    # store & forward (phase 7): data that cannot be delivered waits on disk, not in memory
+    spool_dir: Path | None = None
+    spool_max_mb: int = Field(default=1024, ge=10, le=1_000_000)
 
     @field_validator("syslog")
     @classmethod
@@ -251,6 +261,8 @@ class Settings(BaseModel):
             backup_max_age_hours=int(e.get("HUB_BACKUP_MAX_AGE_HOURS", 26)),
             restore_test=e.get("HUB_RESTORE_TEST", "archive"),  # type: ignore[arg-type]
             restore_test_days=int(e.get("HUB_RESTORE_TEST_DAYS", 7)),
+            spool_dir=_spool_dir(e.get("HUB_SPOOL_DIR")),
+            spool_max_mb=int(e.get("HUB_SPOOL_MAX_MB", 1024)),
         )
 
 

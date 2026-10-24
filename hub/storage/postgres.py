@@ -55,7 +55,8 @@ from hub.storage.records import (
 log = logging.getLogger(__name__)
 audit_log = logging.getLogger("hub.audit")  # copy of every audit row for the SIEM
 _SECURITY_EVENTS = frozenset({"login_failed", "login_throttled", "locked", "mfa_failed",
-                              "network_denied", "user_disabled", "mfa_reset"})
+                              "network_denied", "user_disabled", "mfa_reset",
+                              "directory_unavailable"})
 
 _QUALITY_BY_CODE = {v: k for k, v in QUALITY_CODES.items()}
 _INTEGER_TYPES = frozenset(INTEGER_RANGES)
@@ -63,7 +64,7 @@ _INTEGER_TYPES = frozenset(INTEGER_RANGES)
 _USER_FIELDS = {"display_name", "password_hash", "is_active", "failed_logins", "locked_until",
                 "must_change_password", "language", "last_login_at", "totp_secret_enc",
                 "totp_pending_enc", "totp_enabled", "totp_last_step", "recovery_codes",
-                "password_changed_at", "password_history"}
+                "password_changed_at", "password_history", "external_dn"}
 
 
 def hour_origin(tz: str) -> datetime:
@@ -393,12 +394,15 @@ class PostgresStore:
             return (await (await conn.execute("SELECT count(*) AS n FROM users")).fetchone())["n"]
 
     async def create_user(self, username: str, display_name: str, password_hash: str, *,
-                          must_change_password: bool = True, language: str = "fa") -> UserRecord:
+                          must_change_password: bool = True, language: str = "fa",
+                          auth_source: str = "local", external_dn: str | None = None
+                          ) -> UserRecord:
         async with self._conn() as conn:
             row = await (await conn.execute(
                 "INSERT INTO users (username, display_name, password_hash, must_change_password,"
-                " language) VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                (username, display_name, password_hash, must_change_password, language),
+                " language, auth_source, external_dn) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (username, display_name, password_hash, must_change_password, language,
+                 auth_source, external_dn),
             )).fetchone()
         return UserRecord.model_validate(row)
 
@@ -457,6 +461,26 @@ class PostgresStore:
                 "VALUES (%s,%s,%s,%s,%s) RETURNING *",
                 (user_id, role_id, site, area, granted_by))).fetchone()
         return RoleGrant.model_validate(row)
+
+    async def replace_roles(self, user_id: int,
+                            grants: list[tuple[str, str | None, str | None]]) -> bool:
+        """Make the user's grants exactly ``grants`` (directory users: the groups decide).
+        Returns whether anything changed."""
+        wanted = sorted(set(grants), key=lambda g: (g[0], g[1] or "", g[2] or ""))
+        async with self._conn() as conn, conn.transaction():
+            rows = await (await conn.execute(
+                "SELECT role_id, site, area FROM user_roles WHERE user_id=%s FOR UPDATE",
+                (user_id,))).fetchall()
+            current = sorted({(r["role_id"], r["site"], r["area"]) for r in rows},
+                             key=lambda g: (g[0], g[1] or "", g[2] or ""))
+            if current == wanted:
+                return False
+            await conn.execute("DELETE FROM user_roles WHERE user_id=%s", (user_id,))
+            for role, site, area in wanted:
+                await conn.execute(
+                    "INSERT INTO user_roles (user_id, role_id, site, area, granted_by) "
+                    "VALUES (%s,%s,%s,%s,NULL)", (user_id, role, site, area))
+        return True
 
     async def revoke_role(self, user_role_id: int) -> RoleGrant | None:
         async with self._conn() as conn:

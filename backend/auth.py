@@ -22,6 +22,7 @@ password history and expiry.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -31,6 +32,7 @@ from typing import Any
 
 from backend import totp
 from backend.crypto import CryptoError, seal, unseal
+from backend.directory import PASSWORD_MARKER, Directory, DirectoryError, DirectoryRejected
 from backend.errors import Conflict, Invalid, TooManyRequests, Unauthorized, Unavailable
 from backend.rbac import Principal
 from backend.security import (
@@ -48,9 +50,11 @@ from backend.security import (
 )
 from backend.settings import Settings
 from hub.drivers.base import utcnow
+from hub.models import LdapFile
 from hub.storage.postgres import PostgresStore
 from hub.storage.records import UserRecord
 
+USERNAME_RE = re.compile(r"[a-z][a-z0-9_.-]{2,63}")  # users.username CHECK
 log = logging.getLogger(__name__)
 
 
@@ -77,6 +81,11 @@ class AuthService:
         self._failures_by_addr: dict[str, deque[datetime]] = {}
         self.counters = {"login_ok": 0, "login_failed": 0, "login_throttled": 0,
                          "mfa_failed": 0}
+        self.directory: Directory | None = None
+
+    def use_directory(self, cfg: LdapFile | None) -> None:
+        """Turn directory sign-in on (config/ldap.yaml) or off."""
+        self.directory = Directory(cfg) if cfg is not None and cfg.enabled else None
 
     def _recent_failures(self, addr: str | None, now: datetime) -> deque[datetime] | None:
         if not addr:
@@ -131,6 +140,13 @@ class AuthService:
         username = username.strip().lower()
         await self._check_throttle(username, client_addr, now)
         user = await self.store.get_user_by_username(username)
+        if self.directory is not None and (user is None or user.auth_source == "ldap"):
+            return await self._directory_login(username, password, user, client_addr,
+                                               user_agent, now)
+        if user is not None and user.auth_source == "ldap":
+            self._note_failure(client_addr, now)
+            await self._failed(user, client_addr, "directory_disabled")
+            raise Unauthorized("invalid username or password", code="invalid_credentials")
         ok = verify_password(user.password_hash if user else None, password)
         if user is None:
             self._note_failure(client_addr, now)
@@ -161,6 +177,70 @@ class AuthService:
                                             user_id=user.user_id, client_addr=client_addr)
         if fields:
             user = await self.store.update_user(user.user_id, **fields) or user
+        if user.totp_enabled:
+            return MfaChallenge(make_mfa_token(user.user_id, self.settings.jwt_secret, now))
+        return await self._complete_login(user, client_addr, user_agent, mfa=False)
+
+    async def _directory_login(self, username: str, password: str, user: UserRecord | None,
+                               client_addr: str | None, user_agent: str | None,
+                               now: datetime) -> TokenPair | MfaChallenge:
+        """Active Directory / LDAP: the directory checks the password and decides the roles;
+        lockout, disabling in the hub, MFA and the audit work as for local users."""
+        assert self.directory is not None
+        if user is not None and not user.is_active:
+            self._note_failure(client_addr, now)
+            await self._failed(user, client_addr, "disabled")
+            raise Unauthorized("invalid username or password", code="invalid_credentials")
+        if user is not None and user.locked_until and user.locked_until > now:
+            self._note_failure(client_addr, now)
+            await self._failed(user, client_addr, "locked")
+            raise Unauthorized("account temporarily locked", code="account_locked",
+                               extra={"locked_until": user.locked_until.isoformat()})
+        try:
+            found = await self.directory.authenticate(username, password)
+        except DirectoryRejected as exc:
+            if user is not None:
+                await self._count_failure(user, client_addr, now, "login_failed",
+                                          f"directory: {exc}")
+            else:
+                self._note_failure(client_addr, now)
+                await self.store.add_auth_audit("login_failed", username,
+                                                client_addr=client_addr,
+                                                detail={"reason": f"directory: {exc}"})
+            raise Unauthorized("invalid username or password",
+                               code="invalid_credentials") from exc
+        except DirectoryError as exc:
+            log.error("directory sign-in unavailable: %s", exc)
+            await self.store.add_auth_audit("directory_unavailable", username,
+                                            client_addr=client_addr,
+                                            detail={"error": str(exc)[:300]})
+            raise Unavailable("the directory (Active Directory) cannot be reached; local "
+                              "accounts still work", code="directory_unavailable") from exc
+        grants = self.directory.roles_for(found.groups)
+        if not grants or not USERNAME_RE.fullmatch(username):
+            reason = "no_mapped_group" if not grants else "username_not_supported"
+            self._note_failure(client_addr, now)
+            await self.store.add_auth_audit("login_failed", username,
+                                            user_id=user.user_id if user else None,
+                                            client_addr=client_addr, detail={"reason": reason})
+            raise Unauthorized("your directory account has no role in the hub",
+                               code="no_role")
+        display = found.display_name.strip()[:128] or username
+        if user is None:
+            user = await self.store.create_user(username, display, PASSWORD_MARKER,
+                                                must_change_password=False,
+                                                auth_source="ldap", external_dn=found.dn)
+            await self.store.add_auth_audit("user_created", username, user_id=user.user_id,
+                                            client_addr=client_addr,
+                                            detail={"source": "ldap", "dn": found.dn})
+        elif (user.display_name, user.external_dn) != (display, found.dn):
+            user = await self.store.update_user(user.user_id, display_name=display,
+                                                external_dn=found.dn) or user
+        if await self.store.replace_roles(user.user_id, grants):
+            await self.store.add_auth_audit(
+                "roles_synced", username, user_id=user.user_id, client_addr=client_addr,
+                detail={"source": "ldap", "roles": [
+                    {"role": r, "site": s, "area": a} for r, s, a in grants]})
         if user.totp_enabled:
             return MfaChallenge(make_mfa_token(user.user_id, self.settings.jwt_secret, now))
         return await self._complete_login(user, client_addr, user_agent, mfa=False)
@@ -342,12 +422,27 @@ class AuthService:
                                         client_addr=client_addr)
         return codes
 
+    async def _check_own_password(self, user: UserRecord, password: str) -> None:
+        """Re-check the signed-in user's password (local hash, or the directory)."""
+        if user.auth_source != "ldap":
+            if not verify_password(user.password_hash, password):
+                raise Unauthorized("password is wrong", code="invalid_credentials")
+            return
+        if self.directory is None:
+            raise Unavailable("directory sign-in is not configured", code="directory_unavailable")
+        try:
+            await self.directory.authenticate(user.username, password)
+        except DirectoryRejected as exc:
+            raise Unauthorized("password is wrong", code="invalid_credentials") from exc
+        except DirectoryError as exc:
+            raise Unavailable("the directory (Active Directory) cannot be reached",
+                              code="directory_unavailable") from exc
+
     async def mfa_disable(self, principal: Principal, password: str, code: str,
                           client_addr: str | None) -> None:
         if not principal.user.totp_enabled:
             raise Conflict("MFA is not enabled", code="mfa_not_enabled")
-        if not verify_password(principal.user.password_hash, password):
-            raise Unauthorized("password is wrong", code="invalid_credentials")
+        await self._check_own_password(principal.user, password)
         mfa = await self.store.get_mfa(principal.user_id)
         if totp.verify(self._unseal(mfa["totp_secret_enc"]), code, self.clock().timestamp(),
                        mfa["totp_last_step"]) is None:
@@ -394,6 +489,9 @@ class AuthService:
 
     async def change_password(self, principal: Principal, current: str, new: str,
                               client_addr: str | None) -> None:
+        if principal.user.auth_source == "ldap":
+            raise Conflict("the password of a directory account is changed in Active "
+                           "Directory", code="directory_account")
         if not verify_password(principal.user.password_hash, current):
             raise Unauthorized("current password is wrong", code="invalid_credentials")
         if current == new:

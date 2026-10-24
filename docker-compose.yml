@@ -41,8 +41,10 @@ services:
       - ./pki:/app/pki
       - hub-logs:/app/logs
       - ./backups:/app/backups
+      - hub-spool:/app/spool        # store & forward backlog survives container restarts
     stop_grace_period: 30s
 
 volumes:
   db-data:
   hub-logs:
+  hub-spool:

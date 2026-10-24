@@ -698,7 +698,9 @@
   "disable": "غیرفعال کردن حساب",
   "disable_text": "{user} غیرفعال شود؟ فوراً از سیستم خارج می‌شود.",
   "enable": "فعال کردن حساب",
-  "username_placeholder": "مثلاً op.rahimi"
+  "username_placeholder": "مثلاً op.rahimi",
+  "source_ldap": "Active Directory",
+  "ldap_roles_note": "این کاربر با Active Directory وارد می‌شود. نقش‌هایش در هر ورود از گروه‌های او در دایرکتوری (config/ldap.yaml) گرفته می‌شود و اینجا قابل تغییر نیست. رمزش هم در Active Directory عوض می‌شود."
  },
  "cfg": {
   "devices_title": "دستگاه‌ها",
@@ -852,7 +854,9 @@
   "mfa_disabled": "غیرفعال‌سازی دومرحله‌ای",
   "mfa_failed": "کد دومرحله‌ای اشتباه",
   "mfa_reset": "بازنشانی دومرحله‌ای",
-  "network_denied": "شبکه غیرمجاز"
+  "network_denied": "شبکه غیرمجاز",
+  "roles_synced": "نقش‌ها از Active Directory به‌روز شد",
+  "directory_unavailable": "Active Directory در دسترس نبود"
  },
  "system": {
   "title": "سیستم",
@@ -972,6 +976,7 @@
   "expires": "انقضا",
   "this_session": "همین مرورگر",
   "end": "بستن نشست",
-  "end_text": "آن مرورگر از سیستم خارج شود؟"
+  "end_text": "آن مرورگر از سیستم خارج شود؟",
+  "ldap_password_note": "شما با حساب سازمانی (Active Directory) وارد شده‌اید. رمز را در ویندوز یا از واحد IT عوض کنید."
  }
 }

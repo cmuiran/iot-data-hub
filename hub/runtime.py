@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import select
 import selectors
@@ -30,7 +31,8 @@ from hub.config_loader import ConfigReport
 from hub.drivers import Driver, DriverError, create_driver
 from hub.drivers.base import AnyDevice, Clock, DeviceState, DeviceStatus, utcnow
 from hub.history import HistoryFilter
-from hub.models import Sample, TagBase
+from hub.models import Quality, Sample, TagBase
+from hub.spool import DiskQueue
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +108,8 @@ class HubStats:
     write_errors: int = 0
     last_write_error: str | None = None
     buffered: int = 0
+    spool_batches: int = 0          # sample batches waiting on disk (store & forward)
+    spool_dropped_batches: int = 0  # dropped because the spool reached its size limit
 
 
 DriverFactory = Callable[..., Driver]
@@ -120,6 +124,9 @@ class Hub:
     flush_interval_s: float = 1.0
     max_buffer: int = 200_000
     driver_factory: DriverFactory = create_driver
+    # store & forward: samples the database cannot take wait here instead of being dropped
+    spool: DiskQueue | None = None
+    spool_drain_batches: int = 20   # spooled batches written per flush (live data first)
 
     latest: dict[str, Sample] = field(default_factory=dict)
     statuses: dict[str, DeviceStatus] = field(default_factory=dict)
@@ -148,6 +155,8 @@ class Hub:
     async def start(self) -> None:
         if self.report.has_errors:
             raise RuntimeError("configuration has errors; run python -m hub.validate_config")
+        if self.spool is not None:                 # a backlog from before a restart
+            self.stats.spool_batches = self.spool.count
         if self.store is not None:
             await self.store.sync_config(list(self.devices.values()))
             open_alarms = await self.store.open_alarm_sources()
@@ -273,7 +282,9 @@ class Hub:
                 else:
                     self.stats.samples_filtered += 1
             overflow = len(self._buffer) - self.max_buffer
-            if overflow > 0:
+            if overflow > 0 and self.spool is not None:
+                await self._spill()
+            elif overflow > 0:
                 for _ in range(overflow):
                     self._buffer.popleft()
                 self.stats.samples_dropped += overflow
@@ -381,8 +392,12 @@ class Hub:
             except Exception:
                 self._buffer.extendleft(reversed(batch))
                 self.stats.buffered = len(self._buffer)
+                if self.spool is not None:          # keep it safe on disk until it can go
+                    with contextlib.suppress(Exception):
+                        await self._spill()
                 raise
         self.stats.buffered = 0
+        await self._drain_spool()
         dirty, self._status_dirty = self._status_dirty, {}
         try:
             if dirty:
@@ -390,6 +405,55 @@ class Hub:
         except Exception:
             self._status_dirty = dirty | self._status_dirty
             raise
+
+
+    # --- store & forward -------------------------------------------------------------------
+
+    async def _spill(self) -> None:
+        """Move the memory buffer to the disk spool (oldest first, in batches)."""
+        assert self.spool is not None
+        samples = list(self._buffer)
+        if not samples:
+            return
+        blobs = [encode_samples(samples[i:i + self.batch_size])
+                 for i in range(0, len(samples), self.batch_size)]
+        dropped = await self.spool.put(blobs)
+        self._buffer.clear()
+        self.stats.buffered = 0
+        self.stats.spool_dropped_batches += dropped
+        self.stats.spool_batches = self.spool.count
+        log.info("store & forward: %d sample(s) moved to disk (%d batch(es) waiting)",
+                 len(samples), self.spool.count)
+
+    async def _drain_spool(self) -> None:
+        """Write a part of the spool after a successful flush; the rest on the next ones."""
+        if self.spool is None or not self.spool.count or self.store is None:
+            return
+        items = await self.spool.peek(self.spool_drain_batches)
+        last_id = None
+        try:
+            for item_id, blob in items:
+                self.stats.samples_written += await self.store.write_samples(
+                    decode_samples(blob))
+                last_id = item_id
+        finally:
+            if last_id is not None:
+                await self.spool.ack(last_id)
+            self.stats.spool_batches = self.spool.count
+        if self.spool.count:
+            self._wake.set()                      # more to forward: come back soon
+        else:
+            log.info("store & forward: everything written, the spool is empty")
+
+
+def encode_samples(samples: list[Sample]) -> bytes:
+    return json.dumps([[s.tag, s.timestamp.isoformat(), s.value, str(s.quality)]
+                       for s in samples], separators=(",", ":")).encode()
+
+
+def decode_samples(blob: bytes) -> list[Sample]:
+    return [Sample(tag=tag, timestamp=datetime.fromisoformat(ts), value=value,
+                   quality=Quality(quality)) for tag, ts, value, quality in json.loads(blob)]
 
 
 _WSAENOTSOCK = 10038

@@ -698,7 +698,9 @@
   "disable": "Disable account",
   "disable_text": "Disable {user}? They are signed out at once.",
   "enable": "Enable account",
-  "username_placeholder": "e.g. op.rahimi"
+  "username_placeholder": "e.g. op.rahimi",
+  "source_ldap": "Active Directory",
+  "ldap_roles_note": "This user signs in with Active Directory. Their roles come from their directory groups at every sign-in (config/ldap.yaml) and cannot be changed here; the password is changed in Active Directory."
  },
  "cfg": {
   "devices_title": "Devices",
@@ -852,7 +854,9 @@
   "mfa_disabled": "Two-factor off",
   "mfa_failed": "Wrong two-factor code",
   "mfa_reset": "Two-factor reset",
-  "network_denied": "Refused network"
+  "network_denied": "Refused network",
+  "roles_synced": "Roles synced from Active Directory",
+  "directory_unavailable": "Active Directory unreachable"
  },
  "system": {
   "title": "System",
@@ -972,6 +976,7 @@
   "expires": "Expires",
   "this_session": "This browser",
   "end": "End session",
-  "end_text": "Sign out that browser?"
+  "end_text": "Sign out that browser?",
+  "ldap_password_note": "You signed in with your company account (Active Directory). Change the password in Windows or ask IT."
  }
 }

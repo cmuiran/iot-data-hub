@@ -50,6 +50,7 @@ from hub.models import (
     HttpDevice,
     HttpHeaderAuth,
     Iec104Device,
+    LdapFile,
     McDevice,
     ModbusDevice,
     ModbusRtuDevice,
@@ -78,6 +79,7 @@ CONTROL_FILE = "control.yaml"
 NOTIFICATIONS_FILE = "notifications.yaml"
 NORTHBOUND_FILE = "northbound.yaml"
 MODBUS_SERVER_FILE = "modbus_server.yaml"
+LDAP_FILE = "ldap.yaml"
 
 AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
              | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
@@ -114,6 +116,7 @@ class ConfigReport:
     northbound: NorthboundFile = field(default_factory=NorthboundFile)
     modbus_server: ModbusServerFile = field(
         default_factory=lambda: ModbusServerFile(enabled=False))
+    ldap: LdapFile | None = None                   # directory sign-in (config/ldap.yaml)
     issues: list[Issue] = field(default_factory=list)
     # Every file that was read, mapped to its device_id (None if unknown or not a device file).
     sources: dict[str, str | None] = field(default_factory=dict)
@@ -243,11 +246,16 @@ def load_config(config_dir: Path | str, env: Mapping[str, str] | None = None) ->
     _load_optional(report, NOTIFICATIONS_FILE, NotificationsFile, "notifications")
     _load_optional(report, NORTHBOUND_FILE, NorthboundFile, "northbound")
     _load_optional(report, MODBUS_SERVER_FILE, ModbusServerFile, "modbus_server")
+    _load_optional(report, LDAP_FILE, LdapFile, "ldap")
     _check_alarms(report)
     _check_control(report)
     _check_notifications(report, env)
-    _check_northbound(report)
+    _check_northbound(report, env)
     _check_modbus_server(report)
+    if report.ldap is not None and report.ldap.enabled:
+        _warn_unset_env_vars(report, LDAP_FILE, [
+            ("bind_password_env", report.ldap.bind_password_env),
+            ("ca_file_env", report.ldap.ca_file_env)], env)
 
     log.debug("config loaded: %d devices, %d issues", len(report.devices), len(report.issues))
     return report
@@ -792,7 +800,7 @@ def _check_control(report: ConfigReport) -> None:
                 report.add(Severity.ERROR, CONTROL_FILE, f"{lock.op} needs a numeric tag", loc)
 
 
-def _check_northbound(report: ConfigReport) -> None:
+def _check_northbound(report: ConfigReport, env: Mapping[str, str]) -> None:
     import fnmatch
 
     names: set[str] = set()
@@ -811,6 +819,26 @@ def _check_northbound(report: ConfigReport) -> None:
             if not any(fnmatch.fnmatchcase(p, pattern) for p in paths):
                 report.add(Severity.WARNING, NORTHBOUND_FILE,
                            f"pattern {pattern!r} matches no tag", f"{where}.tags")
+    kafka_names: set[str] = set()
+    for i, k in enumerate(report.northbound.kafka):
+        where = f"kafka[{i}] ({k.name})"
+        if k.name in kafka_names:
+            report.add(Severity.ERROR, NORTHBOUND_FILE, f"duplicate kafka name {k.name!r}",
+                       where)
+        kafka_names.add(k.name)
+        for pattern in k.tags:
+            if not any(fnmatch.fnmatchcase(p, pattern) for p in paths):
+                report.add(Severity.WARNING, NORTHBOUND_FILE,
+                           f"pattern {pattern!r} matches no tag", f"{where}.tags")
+        if k.security_protocol == "PLAINTEXT":
+            report.add(Severity.WARNING, NORTHBOUND_FILE,
+                       "PLAINTEXT: values (and any credentials) cross the network unencrypted",
+                       f"{where}.security_protocol")
+        _warn_unset_env_vars(report, NORTHBOUND_FILE, [
+            (f"{where}.username_env", k.username_env), (f"{where}.password_env", k.password_env),
+            (f"{where}.ca_file_env", k.ca_file_env),
+            (f"{where}.client_certificate_env", k.client_certificate_env),
+            (f"{where}.client_private_key_env", k.client_private_key_env)], env)
 
 
 def _check_modbus_server(report: ConfigReport) -> None:

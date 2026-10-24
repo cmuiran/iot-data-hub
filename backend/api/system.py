@@ -95,6 +95,7 @@ async def stats(svc: ServicesDep, _: Engineer) -> dict[str, Any]:
             "control_enabled": svc.settings.control_enabled,
             "samples_received": s.samples_received, "samples_written": s.samples_written,
             "samples_dropped": s.samples_dropped, "buffered": s.buffered,
+            "spool_batches": s.spool_batches, "spool_dropped_batches": s.spool_dropped_batches,
             "write_errors": s.write_errors, "last_write_error": s.last_write_error,
             "live_subscribers": svc.hub.bus.subscriber_count,
             "devices": {d: str(st.state) for d, st in sorted(svc.hub.statuses.items())}}

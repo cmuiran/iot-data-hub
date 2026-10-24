@@ -596,3 +596,35 @@ Planning rule: about 5000 samples/s per hub (one core) and at most 400 device co
 hub on Windows; beyond that poll slower, use gateways, run on Linux (Docker) or split the plant
 over two hubs.
 
+## 27. Sign-in with Active Directory / LDAP (phase 7)
+
+`config/ldap.yaml` (start from `config/ldap.example.yaml`) turns directory sign-in on; without
+it only local accounts exist. `backend/directory.py` does the directory part:
+
+1. bind with the read-only service account (`bind_dn`, password in `bind_password_env`);
+2. find the user with `user_filter` under `user_base` (the username is escaped, so it cannot
+   change the filter); none or several entries = refused;
+3. groups: `memberOf`, plus with `nested_groups` the groups containing them
+   (`member:1.2.840.113556.1.4.1941:=` - Active Directory's transitive membership);
+4. check the password with a bind as the user. An empty password is refused before any bind
+   (an LDAP simple bind with an empty password is an anonymous bind and would "succeed");
+5. `mappings` turn groups into hub roles (role + optional site / site + area). No mapped
+   group = no access (`401 no_role`).
+
+Only encrypted connections: `ldaps://` or `ldap://` with `start_tls: true` (anything else is
+refused by the configuration check); the server certificate is verified against the system
+CAs or `ca_file_env`.
+
+| Topic | Behaviour |
+|---|---|
+| First sign-in | a hub user is created (`auth_source = ldap`, the DN in `external_dn`, display name from `display_name_attribute`, no local password) - audit `user_created` |
+| Roles | replaced from the groups at every sign-in (`roles_synced` in the audit when they change); the Users page shows them but cannot edit them (409 `directory_account`) |
+| Password | checked by the directory only; changing or resetting it in the hub is refused (409); `hub-admin reset-password` refuses too |
+| Lockout, disabling, MFA, sessions, idle timeout | as for local users: wrong directory passwords count toward the hub lockout; a user disabled in the hub stays out even with the right directory password; MFA works and its "turn off" asks the directory for the password |
+| Directory unreachable | `503 directory_unavailable` (audit `directory_unavailable`, a warning in the SIEM); **local accounts keep working** - keep at least one local admin as the break-glass account |
+| Same username local and in the directory | the local account wins (the directory is asked only for unknown users and `ldap` users) |
+| Usernames | must fit the hub's rule (`[a-z][a-z0-9_.-]{2,63}`, case-insensitive): `sAMAccountName` usually does |
+
+Turn it off again by removing `ldap.yaml` (or `enabled: false`) and reloading the
+configuration; existing directory users then cannot sign in until it is back.
+

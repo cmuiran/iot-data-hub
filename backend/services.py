@@ -15,6 +15,7 @@ from hub.config_loader import ConfigReport
 from hub.drivers.base import utcnow
 from hub.maintenance import Maintenance
 from hub.runtime import Hub
+from hub.spool import DiskQueue
 from hub.storage.postgres import PostgresStore
 
 
@@ -78,8 +79,12 @@ class Services:
     def build(cls, settings: Settings, report: ConfigReport, store: PostgresStore,
               hub: Hub | None = None) -> Services:
         hub = hub or Hub(report, store=store)
-        return cls(settings=settings, report=report, store=store, hub=hub,
-                   auth=AuthService(store, settings),
+        if hub.spool is None and settings.spool_dir is not None:
+            hub.spool = DiskQueue(settings.spool_dir / "samples.db",
+                                  settings.spool_max_mb * 2**20)
+        auth = AuthService(store, settings)
+        auth.use_directory(report.ldap)
+        return cls(settings=settings, report=report, store=store, hub=hub, auth=auth,
                    control=ControlService(hub, store, report.control, settings))
 
     async def start(self) -> None:
@@ -162,6 +167,7 @@ class Services:
         changes = await self.hub.reload(report)
         self.report = report
         self.control.control = report.control
+        self.auth.use_directory(report.ldap)
         if self.notifier is not None:
             self.notifier.config = report.notifications
         if self.opcua_server is not None and self.opcua_server.server is not None:

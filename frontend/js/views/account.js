@@ -110,9 +110,11 @@ export async function render(page, { setTitle, changeLanguage }) {
           field(t('account.language'), segmented(LANGUAGES.map((l) => ({ value: l, label: t(`language.${l}`) })), getLanguage(), (l) => changeLanguage(l))),
           field(t('account.theme'), segmented(['system', 'light', 'dark'].map((v) => ({ value: v, label: t(`account.theme_${v}`) })), themeSetting(), (v) => setTheme(v)))),
         mfaBox),
-      h('div', { class: 'card stack' }, h('h2', null, t('auth.change_password')),
-        field(t('auth.current_password'), cur), field(t('auth.new_password'), next, { hint: t('auth.password_rules') }), field(t('auth.new_password_again'), again),
-        h('div', { class: 'row' }, button(t('common.save'), changePw, { kind: 'primary' })), pwMsg)),
+      me.auth_source === 'ldap'
+        ? h('div', { class: 'card stack' }, h('h2', null, t('auth.change_password')), notice(t('account.ldap_password_note')))
+        : h('div', { class: 'card stack' }, h('h2', null, t('auth.change_password')),
+          field(t('auth.current_password'), cur), field(t('auth.new_password'), next, { hint: t('auth.password_rules') }), field(t('auth.new_password_again'), again),
+          h('div', { class: 'row' }, button(t('common.save'), changePw, { kind: 'primary' })), pwMsg)),
     sessionsBox);
   drawMfa();
   loadSessions();

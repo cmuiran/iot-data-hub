@@ -32,8 +32,8 @@ COPY docs ./docs
 COPY config ./config
 RUN pip install --no-deps -e . \
     && useradd --system --uid 10001 --home-dir /app hub \
-    && mkdir -p /app/logs /app/backups /app/pki \
-    && chown -R hub:hub /app/logs /app/backups /app/pki
+    && mkdir -p /app/logs /app/backups /app/pki /app/spool \
+    && chown -R hub:hub /app/logs /app/backups /app/pki /app/spool
 
 USER hub
 EXPOSE 8000
@@ -42,7 +42,8 @@ ENV HUB_HOST=0.0.0.0 \
     HUB_CONFIG_DIR=/app/config \
     HUB_LOG_FILE=/app/logs/hub.log \
     HUB_BACKUP_DIR=/app/backups \
-    HUB_PKI_DIR=/app/pki
+    HUB_PKI_DIR=/app/pki \
+    HUB_SPOOL_DIR=/app/spool
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"

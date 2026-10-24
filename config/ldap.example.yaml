@@ -1,0 +1,27 @@
+# Sign-in with Active Directory / LDAP. Copy to ldap.yaml to turn it on (docs/backend.md
+# section 27). Only encrypted connections: ldaps:// (636) or ldap:// (389) with start_tls.
+# The service account only needs to read users and groups; its password is an environment
+# variable (never here). Local accounts (e.g. the first admin) keep working when the
+# directory is down.
+url: ldaps://dc1.kish.local:636
+# start_tls: true                 # with ldap://dc1.kish.local:389 instead
+ca_file_env: HUB_LDAP_CA_FILE     # path of the company CA certificate (PEM); unset = system CAs
+bind_dn: CN=svc-hub,OU=Service Accounts,DC=kish,DC=local
+bind_password_env: HUB_LDAP_BIND_PASSWORD
+user_base: OU=Staff,DC=kish,DC=local
+user_filter: (&(objectClass=user)(sAMAccountName={username}))
+group_base: OU=Groups,DC=kish,DC=local
+nested_groups: true               # groups inside groups count (Active Directory)
+display_name_attribute: displayName
+# Group -> role. No mapped group = no access (default deny). Scope like on the Users page.
+mappings:
+  - group: CN=Hub-Admins,OU=Groups,DC=kish,DC=local
+    role: admin
+  - group: CN=Hub-Engineers,OU=Groups,DC=kish,DC=local
+    role: engineer
+  - group: CN=Hub-Operators-Substation,OU=Groups,DC=kish,DC=local
+    role: operator
+    site: kish
+    area: substation
+  - group: CN=Hub-Viewers,OU=Groups,DC=kish,DC=local
+    role: viewer

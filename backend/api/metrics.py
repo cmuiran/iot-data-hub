@@ -73,6 +73,12 @@ async def metrics(request: Request, svc: ServicesDep) -> PlainTextResponse:
         out.metric(name, "counter", help_text, [({}, value)])
     out.metric("hub_storage_buffered", "gauge", "Samples waiting for the database",
                [({}, s.buffered)])
+    out.metric("hub_spool_batches", "gauge",
+               "Sample batches waiting on disk for the database (store & forward)",
+               [({}, s.spool_batches)])
+    out.metric("hub_spool_dropped_batches_total", "counter",
+               "Sample batches dropped because the spool reached HUB_SPOOL_MAX_MB",
+               [({}, s.spool_dropped_batches)])
     out.metric("hub_live_subscribers", "gauge", "Open live (WebSocket) streams",
                [({}, hub.bus.subscriber_count)])
 

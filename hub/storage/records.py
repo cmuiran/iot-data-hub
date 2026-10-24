@@ -70,6 +70,8 @@ class UserRecord(_Record):
     last_login_at: datetime | None
     totp_enabled: bool = False
     password_changed_at: datetime | None = None
+    auth_source: str = "local"          # local | ldap (Active Directory)
+    external_dn: str | None = None
 
 
 class RoleGrant(_Record):

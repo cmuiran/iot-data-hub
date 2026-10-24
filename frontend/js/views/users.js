@@ -54,6 +54,7 @@ export async function render(page, { setTitle }) {
     if (!u.is_active) return badge(t('users.disabled'), 'disabled');
     if (u.locked_until && new Date(u.locked_until) > new Date()) return badge(t('users.locked'), 'error');
     if (u.must_change_password) return badge(t('users.must_change'), 'uncertain');
+    if (u.auth_source === 'ldap') return badge(t('users.source_ldap'), 'online');
     return badge(t('users.active'), 'online');
   }
 
@@ -109,6 +110,7 @@ export async function render(page, { setTitle }) {
       const lang = select([{ value: 'fa', label: t('language.fa') }, { value: 'en', label: t('language.en') }], user.language);
       const grant = grantPicker(Object.keys(roles));
       const self = user.user_id === store.me.user_id;
+      const directory = user.auth_source === 'ldap';   // password and roles come from AD
       mount(body,
         h('div', { class: 'row' }, h('span', { class: 'tagpath' }, user.username), status(user),
           user.mfa_enabled ? badge(t('users.mfa_on'), 'online') : null),
@@ -120,16 +122,17 @@ export async function render(page, { setTitle }) {
         h('div', { class: 'form-grid' }, field(t('users.display_name'), display), field(t('users.language'), lang)),
         h('div', { class: 'row' }, button(t('common.save'), act(() => api(`api/users/${user.user_id}`, { method: 'PATCH', body: { display_name: display.value.trim(), language: lang.value } }), t('common.saved')), { size: 'sm', kind: 'primary' })),
         h('h3', null, t('users.roles')),
-        user.roles.length ? h('div', { class: 'stack tight' }, user.roles.map((g) => h('div', { class: 'row between' }, roleChip(g),
+        directory ? [h('div', { class: 'row' }, user.roles.length ? user.roles.map(roleChip) : empty(t('users.no_roles'))), notice(t('users.ldap_roles_note'))] : null,
+        directory ? null : user.roles.length ? h('div', { class: 'stack tight' }, user.roles.map((g) => h('div', { class: 'row between' }, roleChip(g),
           button(t('users.revoke'), act(async () => {
             if (!(await confirmDialog(t('users.revoke'), t('users.revoke_text', { role: t(`roles.${g.role}`), user: user.display_name }), { danger: true }))) return;
             await api(`api/users/${user.user_id}/roles/${g.user_role_id}`, { method: 'DELETE' });
           }), { size: 'sm' })))) : empty(t('users.no_roles')),
-        grant.el,
-        h('div', { class: 'row' }, button(t('users.grant'), act(() => api(`api/users/${user.user_id}/roles`, { method: 'POST', body: grant.value() }), t('users.granted')), { size: 'sm', iconName: 'plus' })),
+        directory ? null : grant.el,
+        directory ? null : h('div', { class: 'row' }, button(t('users.grant'), act(() => api(`api/users/${user.user_id}/roles`, { method: 'POST', body: grant.value() }), t('users.granted')), { size: 'sm', iconName: 'plus' })),
         h('h3', null, t('users.security')),
         h('div', { class: 'row' },
-          button(t('users.reset_password'), () => resetPassword(user, refresh), { size: 'sm' }),
+          directory ? null : button(t('users.reset_password'), () => resetPassword(user, refresh), { size: 'sm' }),
           user.locked_until ? button(t('users.unlock'), act(() => api(`api/users/${user.user_id}/unlock`, { method: 'POST' }), t('users.unlocked')), { size: 'sm' }) : null,
           user.mfa_enabled ? button(t('users.reset_mfa'), act(async () => {
             if (!(await confirmDialog(t('users.reset_mfa'), t('users.reset_mfa_text'), { danger: true }))) return;
