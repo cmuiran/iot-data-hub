@@ -43,10 +43,14 @@ from hub.models import (
     BrokersFile,
     ControlFile,
     DataType,
+    EnipDevice,
+    FinsDevice,
     HttpBasicAuth,
     HttpBearerAuth,
     HttpDevice,
     HttpHeaderAuth,
+    Iec104Device,
+    McDevice,
     ModbusDevice,
     ModbusRtuDevice,
     ModbusServerFile,
@@ -76,7 +80,7 @@ NORTHBOUND_FILE = "northbound.yaml"
 MODBUS_SERVER_FILE = "modbus_server.yaml"
 
 AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
-             | SnmpDevice)
+             | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
 
 
 class Severity(StrEnum):
@@ -395,6 +399,34 @@ def _check_device(report: ConfigReport, loaded: LoadedDevice, env: Mapping[str, 
         _check_http_device(report, device, source, env)
     elif isinstance(device, SnmpDevice):
         _check_snmp_device(report, device, source, env)
+    elif isinstance(device, FinsDevice | McDevice):
+        _check_word_plc(report, device, source)
+    elif isinstance(device, EnipDevice):
+        _warn_duplicate_addresses(report, source, [
+            (t.name, f"{t.tag}.{t.bit}" if t.bit is not None else t.tag)
+            for t in device.tags], "tag")
+    elif isinstance(device, Iec104Device):
+        _warn_duplicate_addresses(report, source, [
+            (t.name, f"{t.type}:{t.ioa}") for t in device.tags], "ioa")
+
+
+def _check_word_plc(report: ConfigReport, device: FinsDevice | McDevice, source: str) -> None:
+    """Overlapping words of two numeric tags are an error (one of them is surely wrong);
+    the same bit twice is a warning, as for Modbus."""
+    spans: list[tuple[int, str, str, int, int]] = []
+    bits: list[tuple[str, str]] = []
+    for i, tag in enumerate(device.tags):
+        a = tag.parsed
+        if tag.data_type is DataType.BOOL:
+            bits.append((tag.name, f"{a.area}{a.word}.{a.bit}"))
+        else:
+            spans.append((i, tag.name, a.area, a.word, a.word + tag.word_count - 1))
+    _warn_duplicate_addresses(report, source, bits, "address")
+    for (i, na, area_a, sa, ea), (j, nb, area_b, sb, eb) in combinations(spans, 2):
+        if area_a == area_b and sa <= eb and sb <= ea:
+            report.add(Severity.ERROR, source,
+                       f"{area_b}{sb}..{area_b}{eb} overlaps tags[{i}] ({na}) at "
+                       f"{area_a}{sa}..{area_a}{ea}", _tag_loc(j, nb, "address"))
 
 
 def _check_http_device(report: ConfigReport, device: HttpDevice, source: str,

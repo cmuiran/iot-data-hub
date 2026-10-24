@@ -38,7 +38,8 @@ def test_repository_examples_are_valid() -> None:
     report = load_config(REPO_CONFIG, env=_EverythingSet())
     assert messages(report) == []
     protocols = sorted(d.device.protocol for d in report.devices)
-    assert protocols == ["http", "modbus_tcp", "mqtt", "opcua", "s7", "snmp"]
+    assert protocols == ["enip", "fins", "http", "iec104", "mc", "modbus_tcp", "mqtt", "opcua",
+                         "s7", "snmp"]
 
 
 def test_repository_examples_warn_about_unset_env_vars() -> None:

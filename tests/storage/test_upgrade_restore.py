@@ -19,11 +19,12 @@ from hub.maintenance import (
     restore_test,
 )
 from hub.models import DEVICE_ADAPTER
-from hub.storage.migrate import SchemaTooNew, migrate, status
+from hub.storage.migrate import SchemaTooNew, discover, migrate, status
 from tests.hub.builders import modbus_device
 
 pytestmark = pytest.mark.postgres
 KEY = "k" * 40
+LATEST = discover()[-1].version
 NOW = datetime(2026, 10, 24, 1, 0, tzinfo=UTC)
 
 
@@ -39,7 +40,7 @@ async def seeded(store: Any) -> None:
 def test_schema_newer_than_the_code_is_refused(database_url: str) -> None:
     state = status(database_url)
     assert state["pending"] == [] and state["unknown"] == []
-    assert state["applied"][-1] == "0005_protocols"
+    assert state["applied"][-1] == LATEST
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute("INSERT INTO schema_migrations (version) VALUES ('0099_from_the_future')")
     assert status(database_url)["unknown"] == ["0099_from_the_future"]
@@ -107,7 +108,7 @@ async def test_full_restore_test_and_restore(store: Any, database_url: str,
     assert path is not None
     full = [e for e in await store.events("restore_ok", 5) if e["detail"]["mode"] == "full"]
     assert full and full[0]["detail"]["rows"]["users"] == 1
-    assert full[0]["detail"]["schema"] == "0005_protocols"
+    assert full[0]["detail"]["schema"] == LATEST
     # the temporary database is gone again
     with psycopg.connect(database_url, autocommit=True) as conn:
         left = conn.execute("SELECT datname FROM pg_database WHERE datname LIKE "

@@ -1,0 +1,44 @@
+# Omron CJ2M of the cooling tower, FINS/TCP (node addresses from the handshake).
+device_id: plc_omron_01
+name: Cooling tower PLC
+site: kish
+area: utilities
+protocol: fins
+enabled: true
+description: CJ2M-CPU33, FINS/TCP port 9600. Process values in DM, run bits in CIO 0.
+poll_interval_ms: 1000
+connection:
+  host: 192.168.10.70
+  port: 9600
+  transport: tcp
+tags:
+  - name: basin_temperature
+    unit: degC
+    data_type: float32
+    address: D100
+    min: 0
+    max: 60
+  - name: fan_speed
+    unit: "%"
+    data_type: int16
+    address: D102
+    scale: 0.1
+    min: 0
+    max: 100
+  - name: fan_running
+    data_type: bool
+    address: CIO0.00
+  - name: fan_fault
+    data_type: bool
+    address: CIO0.01
+  - name: run_hours
+    unit: h
+    data_type: uint32
+    address: D110
+  - name: temperature_setpoint
+    unit: degC
+    data_type: float32
+    address: D200
+    access: read_write
+    min: 15
+    max: 35

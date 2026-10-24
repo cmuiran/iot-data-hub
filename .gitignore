@@ -60,6 +60,7 @@ desktop.ini
 .sim/
 .dev/
 .preview/
+.preview*/
 .load/
 
 # Release bundles (scripts/windows/build-bundle.ps1)

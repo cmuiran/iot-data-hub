@@ -105,7 +105,11 @@
   "opcua": "OPC UA",
   "s7": "Siemens S7",
   "http": "HTTP / REST",
-  "snmp": "SNMP"
+  "snmp": "SNMP",
+  "fins": "Omron FINS",
+  "mc": "Mitsubishi MC (MELSEC)",
+  "enip": "EtherNet/IP (Logix)",
+  "iec104": "IEC 60870-5-104"
  },
  "roles": {
   "admin": "مدیر سیستم",

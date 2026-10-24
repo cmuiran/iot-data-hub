@@ -17,7 +17,11 @@ from hub.drivers.base import (
 )
 from hub.models import (
     Broker,
+    EnipDevice,
+    FinsDevice,
     HttpDevice,
+    Iec104Device,
+    McDevice,
     ModbusDevice,
     ModbusRtuDevice,
     MqttDevice,
@@ -62,6 +66,22 @@ def create_driver(
         from hub.drivers.snmp import SnmpDriver
 
         return SnmpDriver(device, on_samples, on_status, clock=clock)
+    if isinstance(device, FinsDevice):
+        from hub.drivers.fins import FinsDriver
+
+        return FinsDriver(device, on_samples, on_status, clock=clock)  # type: ignore[arg-type]
+    if isinstance(device, McDevice):
+        from hub.drivers.mc import McDriver
+
+        return McDriver(device, on_samples, on_status, clock=clock)  # type: ignore[arg-type]
+    if isinstance(device, EnipDevice):
+        from hub.drivers.enip import EnipDriver
+
+        return EnipDriver(device, on_samples, on_status, clock=clock)
+    if isinstance(device, Iec104Device):
+        from hub.drivers.iec104 import Iec104Driver
+
+        return Iec104Driver(device, on_samples, on_status, clock=clock)
     raise DriverError(f"no driver for protocol {device.protocol!r}")
 
 

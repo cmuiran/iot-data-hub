@@ -177,5 +177,114 @@
         "max": 100
       }
     ]
+  },
+  "fins": {
+    "device_id": "new_omron_plc_01",
+    "name": "New Omron PLC",
+    "site": "kish",
+    "area": "utilities",
+    "protocol": "fins",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "host": "192.168.10.70",
+      "port": 9600,
+      "transport": "tcp"
+    },
+    "tags": [
+      {
+        "name": "temperature",
+        "unit": "degC",
+        "data_type": "float32",
+        "address": "D100"
+      },
+      {
+        "name": "running",
+        "data_type": "bool",
+        "address": "CIO0.00"
+      }
+    ]
+  },
+  "mc": {
+    "device_id": "new_melsec_plc_01",
+    "name": "New MELSEC PLC",
+    "site": "kish",
+    "area": "utilities",
+    "protocol": "mc",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "host": "192.168.10.80",
+      "port": 5007,
+      "transport": "tcp"
+    },
+    "tags": [
+      {
+        "name": "level",
+        "unit": "%",
+        "data_type": "float32",
+        "address": "D100"
+      },
+      {
+        "name": "running",
+        "data_type": "bool",
+        "address": "M10"
+      }
+    ]
+  },
+  "enip": {
+    "device_id": "new_logix_plc_01",
+    "name": "New Logix PLC",
+    "site": "kish",
+    "area": "utilities",
+    "protocol": "enip",
+    "enabled": false,
+    "poll_interval_ms": 1000,
+    "connection": {
+      "host": "192.168.10.90",
+      "port": 44818,
+      "slot": 0
+    },
+    "tags": [
+      {
+        "name": "flow",
+        "unit": "m3/h",
+        "data_type": "float32",
+        "tag": "Flow"
+      },
+      {
+        "name": "running",
+        "data_type": "bool",
+        "tag": "PumpRunning"
+      }
+    ]
+  },
+  "iec104": {
+    "device_id": "new_rtu_01",
+    "name": "New IEC 104 RTU",
+    "site": "kish",
+    "area": "substation",
+    "protocol": "iec104",
+    "enabled": false,
+    "connection": {
+      "host": "192.168.10.100",
+      "port": 2404,
+      "common_address": 1
+    },
+    "tags": [
+      {
+        "name": "breaker_closed",
+        "data_type": "bool",
+        "ioa": 1001,
+        "type": "double"
+      },
+      {
+        "name": "power",
+        "unit": "MW",
+        "data_type": "float32",
+        "ioa": 3001,
+        "type": "float"
+      }
+    ]
   }
 }

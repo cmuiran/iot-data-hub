@@ -4,7 +4,8 @@
 
 Writes ``.sim/config``: a copy of the configuration pointing at local simulators (Modbus TCP
 servers on 127.0.0.1:15020+, an embedded MQTT broker, OPC UA servers on 127.0.0.1:14840+, S7
-PLCs on 127.0.0.1:15102+, one HTTP server, SNMP agents on 127.0.0.1:16161+; security and
+PLCs on 127.0.0.1:15102+, one HTTP server, SNMP agents on 127.0.0.1:16161+, Omron FINS / MELSEC
+MC / Logix EtherNet/IP / IEC 104 stations on 127.0.0.1:15300+; security and
 credentials removed, except SNMP, which needs a community: it is written to
 ``.sim/sim.env``), then runs the simulators until Ctrl+C. Start the hub against the copy in
 another terminal, e.g.::
@@ -36,7 +37,11 @@ from hub.config_loader import (
 )
 from hub.models import (
     AlarmRule,
+    EnipDevice,
+    FinsDevice,
     HttpDevice,
+    Iec104Device,
+    McDevice,
     ModbusDevice,
     ModbusRtuDevice,
     MqttDevice,
@@ -46,7 +51,11 @@ from hub.models import (
 )
 from hub.runtime import run
 from hub.validate_config import print_report
+from simulators.enip_sim import EnipSimServer, SimulatedEnipDevice
+from simulators.fins_sim import FinsSimServer, SimulatedFinsDevice
 from simulators.http_sim import HttpSimServer, SimulatedHttpDevice
+from simulators.iec104_sim import Iec104SimServer, SimulatedIec104Device
+from simulators.mc_sim import McSimServer, SimulatedMcDevice
 from simulators.modbus_sim import ModbusSimServer, SimulatedModbusDevice
 from simulators.mqtt_sim import EmbeddedBroker, SimulatedMqttDevice
 from simulators.opcua_sim import SimulatedOpcUaServer
@@ -91,7 +100,7 @@ def _safe_bools(rules: dict[str, AlarmRule], device: Any) -> dict[str, bool]:
 
 async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
                 opcua_base: int, s7_base: int = 15102, http_port: int = 18080,
-                snmp_base: int = 16161) -> int:
+                snmp_base: int = 16161, plc_base: int = 15300) -> int:
     report = load_config(config_dir, env={})
     if report.has_errors:
         print_report(report, sys.stderr)
@@ -115,6 +124,8 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
     http_server = HttpSimServer(http_port)
     http_devices: list[HttpDevice] = []
     snmp_agents: dict[str, SnmpSimAgent] = {}
+    plc_ports: dict[tuple[str, str, int], int] = {}     # (protocol, host, port) -> local port
+    plc_devices: list[Any] = []
     community = "hubsim"
 
     for loaded in report.devices:
@@ -159,6 +170,12 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
             data["connection"].update(host="127.0.0.1", port=agent.port,
                                       security={"version": "2c",
                                                 "community_env": SIM_COMMUNITY_ENV})
+        elif isinstance(d, FinsDevice | McDevice | EnipDevice | Iec104Device):
+            key = (d.protocol, d.connection.host.lower(), d.connection.port)
+            if key not in plc_ports:
+                plc_ports[key] = plc_base + len(plc_ports)
+            data["connection"].update(host="127.0.0.1", port=plc_ports[key])
+            plc_devices.append(d)
         files[d.device_id] = data
 
     opcua_servers = []
@@ -237,6 +254,30 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
                 await sim.set(d.device_id, name, value)
         await sim.step(0)
 
+    plc_servers: dict[int, Any] = {}
+    plc_sims: list[Any] = []
+    for d in plc_devices:
+        sim_dev_cfg = _normal(sim_by_id[d.device_id], rules)
+        port = sim_dev_cfg.connection.port
+        if port not in plc_servers:
+            if isinstance(d, FinsDevice):
+                plc_servers[port] = FinsSimServer(port, transport=d.connection.transport)
+            elif isinstance(d, McDevice):
+                plc_servers[port] = McSimServer(port, transport=d.connection.transport)
+            elif isinstance(d, EnipDevice):
+                plc_servers[port] = EnipSimServer(port)
+            else:
+                plc_servers[port] = Iec104SimServer(port)
+            await plc_servers[port].start()
+        server = plc_servers[port]
+        sim_cls: Any = {FinsSimServer: SimulatedFinsDevice, McSimServer: SimulatedMcDevice,
+                        EnipSimServer: SimulatedEnipDevice,
+                        Iec104SimServer: SimulatedIec104Device}[type(server)]
+        plc = sim_cls(server, sim_dev_cfg)
+        for name, value in _safe_bools(rules, d).items():
+            plc.set(name, value)
+        plc_sims.append(plc)
+
     lines = [f"simulating {len(files)} device(s); config for the hub: {sim_config}",
              f"  Modbus TCP: {', '.join(f'127.0.0.1:{s.port}' for s in modbus_servers.values())}"]
     if mqtt_devices or report.northbound.targets:
@@ -247,6 +288,8 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
         lines.append(f"  HTTP: http://127.0.0.1:{http_server.port}/<device_id>")
     lines += [f"  SNMP ({device_id}): 127.0.0.1:{a.port}/udp"
               for device_id, a in snmp_agents.items()]
+    for (protocol, host, _), port in plc_ports.items():
+        lines.append(f"  {protocol} {host} -> 127.0.0.1:{port}")
     lines.append(f"start the hub:  hub-api --config-dir {sim_config} --env-file "
                  f"{out / 'sim.env'} --dev --embedded-db {out / 'db'}")
     print("\n".join(lines), flush=True)
@@ -262,7 +305,13 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
                 await o.step()
             for sim in [*s7_sims, *http_sims, *snmp_sims]:
                 sim.step()
+            for plc in plc_sims:
+                result = plc.step()
+                if asyncio.iscoroutine(result):             # IEC 104 sends spontaneous data
+                    await result
     finally:
+        for plc_server in plc_servers.values():
+            await plc_server.stop()
         for server7 in s7_servers.values():
             server7.stop()
         for agent in snmp_agents.values():
@@ -287,11 +336,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--s7-port", type=int, default=15102)
     parser.add_argument("--http-port", type=int, default=18080)
     parser.add_argument("--snmp-port", type=int, default=16161)
+    parser.add_argument("--plc-port", type=int, default=15300,
+                        help="first port for FINS, MC, EtherNet/IP and IEC 104 stations")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     with contextlib.suppress(KeyboardInterrupt):
         return run(_main(args.config_dir, args.out, args.modbus_port, args.mqtt_port,
-                         args.opcua_port, args.s7_port, args.http_port, args.snmp_port))
+                         args.opcua_port, args.s7_port, args.http_port, args.snmp_port,
+                         args.plc_port))
     return 0
 
 

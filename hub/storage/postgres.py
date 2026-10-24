@@ -25,7 +25,11 @@ from hub.models import (
     INTEGER_RANGES,
     QUALITY_CODES,
     DataType,
+    EnipTag,
+    FinsTag,
     HttpTag,
+    Iec104Tag,
+    McTag,
     ModbusTag,
     MqttTag,
     OpcUaTag,
@@ -121,6 +125,13 @@ def _address(tag: TagBase) -> dict[str, Any]:
         return {"path": tag.path, "json_path": tag.json_path}
     if isinstance(tag, SnmpTag):
         return {"oid": tag.oid}
+    if isinstance(tag, FinsTag | McTag):
+        return {"address": tag.address.upper()}
+    if isinstance(tag, EnipTag):
+        return {"tag": tag.tag} | ({"bit": tag.bit} if tag.bit is not None else {})
+    if isinstance(tag, Iec104Tag):
+        return {"ioa": tag.ioa, "type": tag.type} | (
+            {"command_ioa": tag.command_ioa} if tag.command_ioa else {})
     return {}
 
 

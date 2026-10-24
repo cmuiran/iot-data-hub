@@ -125,7 +125,7 @@ async def test_commands_against_the_simulators(tmp_path: Path, monkeypatch: pyte
         out_md = tmp_path / "sat" / "all.md"
         assert await _run(c + ["read", "--seconds", "4", "--out", str(out_md)]) == 0
         text = capsys.readouterr().out
-        assert "6/6 device(s) passed" in text
+        assert "10/10 device(s) passed" in text
         sheet = out_md.read_text(encoding="utf-8")
         assert "| Tag | Value |" in sheet and "PASS" in sheet
         assert await _run(c + ["read", "meter_01", "--seconds", "2", "--out",

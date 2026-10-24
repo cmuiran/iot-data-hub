@@ -903,6 +903,308 @@ class SnmpConnection(_Strict):
 
 
 # --------------------------------------------------------------------------------------------
+# Phase 7 protocols: Omron FINS, Mitsubishi MC (MELSEC), EtherNet/IP (Logix), IEC 60870-5-104.
+# Tags and connections together, per protocol.
+# --------------------------------------------------------------------------------------------
+
+# Data types a group of 16-bit PLC words can hold (FINS, MC), with their width in words.
+WORD_TYPES: dict[DataType, int] = {
+    DataType.INT16: 1, DataType.UINT16: 1,
+    DataType.INT32: 2, DataType.UINT32: 2, DataType.FLOAT32: 2,
+    DataType.INT64: 4, DataType.UINT64: 4, DataType.FLOAT64: 4,
+}
+
+
+class WordAddress(BaseModel):
+    """A parsed word-memory address: area, word number and optional bit."""
+
+    model_config = ConfigDict(frozen=True)
+
+    area: str
+    word: int
+    bit: int | None = None
+
+
+def _word_tag_checks(tag: TagBase, a: WordAddress, max_bit: int = 15) -> None:
+    if tag.data_type is DataType.BOOL:
+        if a.bit is None:
+            raise ValueError("bool tags need a bit address (e.g. D100.05 / D100.5)")
+        if a.bit > max_bit:
+            raise ValueError(f"bit {a.bit} is outside the word (0..{max_bit})")
+    else:
+        if a.bit is not None:
+            raise ValueError("a bit address holds a bool; use data_type bool")
+        if tag.data_type not in WORD_TYPES:
+            raise ValueError(f"{tag.data_type} cannot be stored in PLC words; use "
+                             + ", ".join(str(t) for t in WORD_TYPES) + " or bool")
+
+
+# --- Omron FINS -----------------------------------------------------------------------------
+
+FINS_AREAS = {"CIO": "CIO", "W": "W", "WR": "W", "H": "H", "HR": "H", "A": "A", "AR": "A",
+              "D": "D", "DM": "D"}
+_FINS_RE = re.compile(r"(?P<area>CIO|DM|WR|HR|AR|[DWHA])(?P<word>\d{1,5})(?:\.(?P<bit>\d{1,2}))?")
+
+
+def parse_fins_address(text: str) -> WordAddress:
+    m = _FINS_RE.fullmatch(text.strip().upper())
+    if m is None:
+        raise ValueError(f"{text!r} is not a FINS address; examples: D100, DM100, CIO10.05, "
+                         "W20, H5.03, A100")
+    word = int(m["word"])
+    if word > 32767:
+        raise ValueError(f"{text!r}: word {word} is beyond the area (0..32767)")
+    return WordAddress(area=FINS_AREAS[m["area"]], word=word,
+                       bit=int(m["bit"]) if m["bit"] is not None else None)
+
+
+class FinsTag(TagBase):
+    """An Omron CS/CJ/NJ/NX memory point: ``D100`` (DM word), ``CIO10.05`` (bit 5 of CIO 10),
+    ``W20``, ``H5``, ``A100``. 32/64-bit values span 2/4 words, lowest word first by default
+    (``connection.word_order``)."""
+
+    address: str
+
+    @property
+    def parsed(self) -> WordAddress:
+        return parse_fins_address(self.address)
+
+    @property
+    def word_count(self) -> int:
+        return 1 if self.data_type is DataType.BOOL else WORD_TYPES[self.data_type]
+
+    @model_validator(mode="after")
+    def _check_fins(self) -> FinsTag:
+        a = parse_fins_address(self.address)
+        _word_tag_checks(self, a)
+        if self.access is Access.READ_WRITE and a.area == "A":
+            raise ValueError("auxiliary area (A) words are system words; access must be read")
+        return self
+
+
+class FinsConnection(_Strict):
+    """FINS/TCP (port 9600, node addresses negotiated) or FINS/UDP (give the PLC's node,
+    usually the last octet of its IP address, and this hub's node)."""
+
+    host: Host
+    port: int = Field(default=9600, ge=1, le=65535)
+    transport: Literal["tcp", "udp"] = "tcp"
+    dest_network: int = Field(default=0, ge=0, le=127)
+    dest_node: int = Field(default=0, ge=0, le=254, description="0 = from the TCP handshake")
+    dest_unit: int = Field(default=0, ge=0, le=255, description="0 = the CPU unit")
+    src_node: int = Field(default=0, ge=0, le=254, description="UDP: this hub's node")
+    timeout_ms: int = Field(default=2000, ge=100, le=60_000)
+    word_order: Order = "little"
+    max_words_per_read: int = Field(default=500, ge=1, le=990)
+    max_gap_words: int = Field(default=16, ge=0, le=500)
+
+    @model_validator(mode="after")
+    def _check_udp(self) -> FinsConnection:
+        if self.transport == "udp" and (self.dest_node == 0 or self.src_node == 0):
+            raise ValueError("FINS/UDP needs dest_node (the PLC) and src_node (this hub)")
+        return self
+
+
+# --- Mitsubishi MC protocol (MELSEC, 3E binary frame) ---------------------------------------
+
+# device -> (binary device code, word device?, hexadecimal numbering?)
+MC_DEVICES: dict[str, tuple[int, bool, bool]] = {
+    "D": (0xA8, True, False), "W": (0xB4, True, True), "R": (0xAF, True, False),
+    "ZR": (0xB0, True, False), "SD": (0xA9, True, False), "SW": (0xB5, True, True),
+    "TN": (0xC2, True, False), "CN": (0xC5, True, False),
+    "X": (0x9C, False, True), "Y": (0x9D, False, True), "M": (0x90, False, False),
+    "L": (0x92, False, False), "B": (0xA0, False, True), "SM": (0x91, False, False),
+    "F": (0x93, False, False), "SB": (0xA1, False, True),
+}
+_MC_RE = re.compile(r"(?P<dev>ZR|SD|SW|TN|CN|SM|SB|[DWRXYMLBF])(?P<num>[0-9A-F]{1,7})"
+                    r"(?:\.(?P<bit>[0-9A-F]))?")
+
+
+def parse_mc_address(text: str) -> WordAddress:
+    m = _MC_RE.fullmatch(text.strip().upper())
+    if m is None:
+        raise ValueError(f"{text!r} is not a MELSEC address; examples: D100, D100.5, W1A, "
+                         "R2000, M10, X1F, Y20, B3")
+    dev = m["dev"]
+    _, is_word, is_hex = MC_DEVICES[dev]
+    try:
+        number = int(m["num"], 16 if is_hex else 10)
+    except ValueError:
+        raise ValueError(f"{text!r}: {dev} numbers are decimal") from None
+    if number > 0xFFFFFF:
+        raise ValueError(f"{text!r}: device number too large")
+    bit = m["bit"]
+    if bit is not None and not is_word:
+        raise ValueError(f"{text!r}: {dev} is a bit device; a bit suffix is for word devices")
+    return WordAddress(area=dev, word=number, bit=int(bit, 16) if bit is not None else None)
+
+
+class McTag(TagBase):
+    """A MELSEC device: word devices ``D100``, ``W1A`` (hex), ``R2000``, ``ZR10000``, a bit of a
+    word ``D100.5``; bit devices ``M10``, ``X1F`` (hex), ``Y20`` (hex), ``B3`` (hex), ``L5``.
+    32/64-bit values span 2/4 words, lowest word first (``connection.word_order``)."""
+
+    address: str
+
+    @property
+    def parsed(self) -> WordAddress:
+        return parse_mc_address(self.address)
+
+    @property
+    def is_bit_device(self) -> bool:
+        return not MC_DEVICES[self.parsed.area][1]
+
+    @property
+    def word_count(self) -> int:
+        return 1 if self.data_type is DataType.BOOL else WORD_TYPES[self.data_type]
+
+    @model_validator(mode="after")
+    def _check_mc(self) -> McTag:
+        a = parse_mc_address(self.address)
+        if not MC_DEVICES[a.area][1]:                      # bit device: one point = one bool
+            if self.data_type is not DataType.BOOL:
+                raise ValueError(f"{a.area} is a bit device; data_type must be bool")
+        else:
+            _word_tag_checks(self, a)
+            if a.bit is not None and self.access is Access.READ_WRITE:
+                raise ValueError("a bit of a word register (D100.5) is read-only: writing it "
+                                 "would need a read-modify-write of the whole word")
+        if self.access is Access.READ_WRITE and a.area in ("X", "SM", "SD"):
+            raise ValueError(f"{a.area} (inputs / special relays and registers) is read-only")
+        return self
+
+
+class McConnection(_Strict):
+    """MC protocol, QnA-compatible 3E frame, binary code (Q/L/iQ-R/iQ-F with an Ethernet port
+    set to "MC protocol", binary, the port number below)."""
+
+    host: Host
+    port: int = Field(ge=1, le=65535, description="the MC port opened in GX Works (e.g. 5007)")
+    transport: Literal["tcp", "udp"] = "tcp"
+    network: int = Field(default=0, ge=0, le=239)
+    pc: int = Field(default=0xFF, ge=0, le=255)
+    module_io: int = Field(default=0x03FF, ge=0, le=0xFFFF)
+    station: int = Field(default=0, ge=0, le=255)
+    timeout_ms: int = Field(default=2000, ge=250, le=60_000)
+    word_order: Order = "little"
+    max_points_per_read: int = Field(default=480, ge=1, le=960)
+    max_gap_points: int = Field(default=16, ge=0, le=480)
+
+
+# --- EtherNet/IP (CIP, Allen-Bradley Logix tags) --------------------------------------------
+
+_LOGIX_SEGMENT = r"[A-Za-z_][A-Za-z0-9_]{0,39}(?:\[\d{1,6}(?:,\d{1,6}){0,2}\])?"
+_LOGIX_TAG_RE = re.compile(rf"(?:Program:[A-Za-z_][A-Za-z0-9_]{{0,39}}\.)?{_LOGIX_SEGMENT}"
+                           rf"(?:\.{_LOGIX_SEGMENT})*")
+
+
+class EnipTag(TagBase):
+    """A Logix (ControlLogix / CompactLogix / Micro800) tag by name: ``Speed``,
+    ``Program:Main.Level``, ``Motors[3].Current``. ``bit`` reads one bit of an integer tag
+    (read-only). Types: BOOL bool, SINT/INT int16, UINT uint16, DINT int32, UDINT uint32,
+    LINT int64, ULINT uint64, REAL float32, LREAL float64, STRING string (read-only)."""
+
+    tag: str = Field(max_length=200)
+    bit: int | None = Field(default=None, ge=0, le=63)
+
+    @model_validator(mode="after")
+    def _check_enip(self) -> EnipTag:
+        if not _LOGIX_TAG_RE.fullmatch(self.tag):
+            raise ValueError(f"{self.tag!r} is not a Logix tag name (e.g. Speed, "
+                             "Program:Main.Level, Motors[3].Current)")
+        if self.bit is not None:
+            if self.data_type is not DataType.BOOL:
+                raise ValueError("bit selects a bool out of an integer tag; data_type bool")
+            if self.access is Access.READ_WRITE:
+                raise ValueError("bits of an integer are read-only; write a BOOL tag instead")
+        if self.data_type is DataType.STRING and self.access is Access.READ_WRITE:
+            raise ValueError("STRING tags are read-only")
+        return self
+
+
+class EnipConnection(_Strict):
+    """EtherNet/IP explicit messaging (TCP 44818). ``slot`` routes through the backplane to
+    the CPU (ControlLogix: the CPU slot; CompactLogix: 0); ``null`` sends straight to the
+    adapter (Micro800, embedded ports)."""
+
+    host: Host
+    port: int = Field(default=44818, ge=1, le=65535)
+    slot: int | None = Field(default=0, ge=0, le=31)
+    timeout_ms: int = Field(default=3000, ge=100, le=60_000)
+    max_tags_per_request: int = Field(default=20, ge=1, le=100)
+
+
+# --- IEC 60870-5-104 ------------------------------------------------------------------------
+
+IEC104_TYPES: dict[str, frozenset[DataType]] = {
+    "single": frozenset({DataType.BOOL}),
+    "double": frozenset({DataType.BOOL, DataType.UINT16}),
+    "step": frozenset({DataType.INT16}),
+    "bitstring": frozenset({DataType.UINT32}),
+    "normalized": frozenset({DataType.FLOAT32, DataType.FLOAT64}),
+    "scaled": frozenset({DataType.INT16, DataType.INT32}),
+    "float": frozenset({DataType.FLOAT32, DataType.FLOAT64}),
+    "integrated": frozenset({DataType.INT32, DataType.INT64}),
+}
+IEC104_COMMANDS = frozenset({"single", "double", "normalized", "scaled", "float"})
+
+
+class Iec104Tag(TagBase):
+    """An information object of an IEC 60870-5-104 outstation (RTU, bay controller, gateway).
+
+    ``type`` is the monitoring type the outstation sends (with or without time tag):
+    single (M_SP), double (M_DP; bool = ON, or uint16 = the raw DPI 0..3), step (M_ST),
+    bitstring (M_BO), normalized (M_ME_NA, -1..1), scaled (M_ME_NB), float (M_ME_NC),
+    integrated (M_IT, counters). Writable: single, double (C_SC / C_DC) and the three setpoint
+    types (C_SE_NA/NB/NC), sent to ``command_ioa`` (default: the same IOA)."""
+
+    ioa: int = Field(ge=1, le=16_777_215, description="information object address")
+    type: Literal["single", "double", "step", "bitstring", "normalized", "scaled", "float",
+                  "integrated"]
+    command_ioa: int | None = Field(default=None, ge=1, le=16_777_215)
+    select_before_operate: bool = False
+
+    @model_validator(mode="after")
+    def _check_iec104(self) -> Iec104Tag:
+        if self.data_type not in IEC104_TYPES[self.type]:
+            allowed = ", ".join(sorted(str(t) for t in IEC104_TYPES[self.type]))
+            raise ValueError(f"{self.type} points hold {allowed}")
+        if self.access is Access.READ_WRITE and self.type not in IEC104_COMMANDS:
+            raise ValueError(f"{self.type} points cannot be commanded; access must be read")
+        if self.command_ioa is not None and self.access is not Access.READ_WRITE:
+            raise ValueError("command_ioa is for writable tags")
+        return self
+
+
+class Iec104Connection(_Strict):
+    """IEC 60870-5-104 controlling station (client): TCP 2404, 2-byte COT, 3-byte IOA."""
+
+    host: Host
+    port: int = Field(default=2404, ge=1, le=65535)
+    common_address: int = Field(ge=1, le=65534, description="ASDU address of the station")
+    originator_address: int = Field(default=0, ge=0, le=255)
+    t0_s: int = Field(default=30, ge=1, le=255, description="connection establishment")
+    t1_s: int = Field(default=15, ge=1, le=255, description="wait for an acknowledgement")
+    t2_s: int = Field(default=10, ge=1, le=255, description="acknowledge received frames")
+    t3_s: int = Field(default=20, ge=1, le=172_800, description="test frame when idle")
+    k: int = Field(default=12, ge=1, le=32767)
+    w: int = Field(default=8, ge=1, le=32767)
+    interrogation_interval_s: int = Field(default=900, ge=0, le=86_400,
+                                          description="general interrogation (0 = at start only)")
+    counter_interrogation_interval_s: int = Field(default=900, ge=0, le=86_400)
+    stale_after_s: float | None = Field(default=None, ge=1, le=86_400,
+                                        description="no frame for this long = offline")
+
+    @model_validator(mode="after")
+    def _check_timers(self) -> Iec104Connection:
+        if not self.t2_s < self.t1_s:
+            raise ValueError("t2 must be shorter than t1 (IEC 60870-5-104)")
+        if self.w > self.k * 2 // 3 + 1:
+            raise ValueError("w should not exceed two thirds of k")
+        return self
+
+
+# --------------------------------------------------------------------------------------------
 # Devices
 # --------------------------------------------------------------------------------------------
 
@@ -975,12 +1277,42 @@ class SnmpDevice(DeviceBase):
     tags: list[SnmpTag] = Field(default_factory=list)
 
 
+class FinsDevice(DeviceBase):
+    protocol: Literal["fins"]
+    connection: FinsConnection
+    poll_interval_ms: PollInterval = 1000
+    tags: list[FinsTag] = Field(default_factory=list)
+
+
+class McDevice(DeviceBase):
+    protocol: Literal["mc"]
+    connection: McConnection
+    poll_interval_ms: PollInterval = 1000
+    tags: list[McTag] = Field(default_factory=list)
+
+
+class EnipDevice(DeviceBase):
+    protocol: Literal["enip"]
+    connection: EnipConnection
+    poll_interval_ms: PollInterval = 1000
+    tags: list[EnipTag] = Field(default_factory=list)
+
+
+class Iec104Device(DeviceBase):
+    """IEC 104 outstations push data (spontaneous, periodic, interrogation): no poll interval."""
+
+    protocol: Literal["iec104"]
+    connection: Iec104Connection
+    tags: list[Iec104Tag] = Field(default_factory=list)
+
+
 AnyModbusDevice = ModbusDevice | ModbusRtuDevice
 AnyDeviceModel = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device
-                  | HttpDevice | SnmpDevice)
+                  | HttpDevice | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
 Device = Annotated[AnyDeviceModel, Field(discriminator="protocol")]
 DEVICE_ADAPTER: TypeAdapter[AnyDeviceModel] = TypeAdapter(Device)
-PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp")
+PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp", "fins", "mc",
+             "enip", "iec104")
 
 
 # --------------------------------------------------------------------------------------------

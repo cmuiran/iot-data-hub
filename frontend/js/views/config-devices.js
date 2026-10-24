@@ -39,7 +39,7 @@ export async function render(page, { navigate, setTitle }) {
   }
 
   const add = () => {
-    const proto = select(['modbus_tcp', 'modbus_rtu', 'mqtt', 'opcua', 's7', 'http', 'snmp'].map((p) => ({ value: p, label: t(`protocol.${p}`) })), 'modbus_tcp');
+    const proto = select(['modbus_tcp', 'modbus_rtu', 'mqtt', 'opcua', 's7', 'http', 'snmp', 'fins', 'mc', 'enip', 'iec104'].map((p) => ({ value: p, label: t(`protocol.${p}`) })), 'modbus_tcp');
     modal({
       title: t('cfg.new_device'),
       body: h('div', { class: 'stack' }, field(t('cfg.protocol'), proto), notice(t('cfg.new_hint'))),

@@ -1,0 +1,42 @@
+# Mitsubishi iQ-F (FX5U) of the fuel transfer skid, MC protocol 3E binary over TCP.
+device_id: plc_melsec_01
+name: Fuel transfer PLC
+site: kish
+area: fuel_depot
+protocol: mc
+enabled: true
+description: FX5U-32MT, built-in Ethernet, MC protocol (binary) opened on TCP 5007.
+poll_interval_ms: 1000
+connection:
+  host: 192.168.10.80
+  port: 5007
+  transport: tcp
+tags:
+  - name: tank_level
+    unit: "%"
+    data_type: float32
+    address: D100
+    min: 0
+    max: 100
+  - name: flow_rate
+    unit: m3/h
+    data_type: int16
+    address: D102
+    scale: 0.1
+    min: 0
+    max: 120
+  - name: total_volume
+    unit: m3
+    data_type: uint32
+    address: D104
+    scale: 0.01
+  - name: pump_running
+    data_type: bool
+    address: M10
+  - name: high_level_switch
+    data_type: bool
+    address: X1
+  - name: pump_start
+    data_type: bool
+    address: Y20
+    access: read_write

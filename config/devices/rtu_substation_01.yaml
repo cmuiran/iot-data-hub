@@ -1,0 +1,41 @@
+# Bay controller of the 20 kV substation, IEC 60870-5-104 (common address 1).
+device_id: rtu_substation_01
+name: 20 kV substation RTU
+site: kish
+area: substation
+protocol: iec104
+enabled: true
+description: RTU / gateway, TCP 2404. Monitoring only; commands are not enabled for this bay.
+connection:
+  host: 192.168.10.100
+  port: 2404
+  common_address: 1
+tags:
+  - name: incomer_breaker_closed
+    data_type: bool
+    ioa: 1001
+    type: double
+  - name: earth_fault_alarm
+    data_type: bool
+    ioa: 1002
+    type: single
+  - name: incomer_power
+    unit: MW
+    data_type: float32
+    ioa: 3001
+    type: float
+    min: 0
+    max: 20
+  - name: busbar_voltage
+    unit: kV
+    data_type: float32
+    ioa: 3002
+    type: float
+    min: 18
+    max: 22
+  - name: energy_import
+    unit: MWh
+    data_type: int64
+    ioa: 4001
+    type: integrated
+    scale: 0.001

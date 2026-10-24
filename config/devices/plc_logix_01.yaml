@@ -1,0 +1,42 @@
+# Allen-Bradley CompactLogix of the desalination unit, EtherNet/IP (CIP) by tag name.
+device_id: plc_logix_01
+name: Desalination PLC
+site: kish
+area: water_treatment
+protocol: enip
+enabled: true
+description: 5069-L320ER, controller tags (and the Main program's Level), slot 0.
+poll_interval_ms: 1000
+connection:
+  host: 192.168.10.90
+  port: 44818
+  slot: 0
+tags:
+  - name: permeate_flow
+    unit: m3/h
+    data_type: float32
+    tag: PermeateFlow
+    min: 0
+    max: 80
+  - name: feed_pressure
+    unit: bar
+    data_type: float32
+    tag: Program:Main.FeedPressure
+    min: 0
+    max: 70
+  - name: hp_pump_running
+    data_type: bool
+    tag: HPPumpRunning
+  - name: conductivity
+    unit: uS/cm
+    data_type: int32
+    tag: Conductivity
+    min: 0
+    max: 1000
+  - name: flow_setpoint
+    unit: m3/h
+    data_type: float32
+    tag: FlowSetpoint
+    access: read_write
+    min: 10
+    max: 70
