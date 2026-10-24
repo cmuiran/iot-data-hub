@@ -18,3 +18,27 @@ targets:
     heartbeat_s: 300            # republish unchanged values this often
     min_interval_s: 1           # at most one message per tag and second
     queue_max: 10000            # kept while the broker is unreachable
+    store_and_forward: true     # beyond queue_max, keep messages on disk (HUB_SPOOL_DIR) and
+    spool_max_mb: 512           #   send them in order after the reconnect
+
+# Apache Kafka (data lake, analytics). Key = tag path, value = {"tag", "v", "ts", "q", "u", "node"}.
+# Encrypted by default; credentials and certificate paths are environment variable names.
+kafka:
+  - name: datalake
+    bootstrap_servers:
+      - kafka1.kish.local:9093
+      - kafka2.kish.local:9093
+    topic: gatekish.samples
+    tags:
+      - kish.*
+    security_protocol: SASL_SSL   # SASL_SSL | SSL | PLAINTEXT (only with allow_plaintext: true)
+    sasl_mechanism: SCRAM-SHA-512
+    username_env: HUB_KAFKA_USERNAME
+    password_env: HUB_KAFKA_PASSWORD
+    ca_file_env: HUB_KAFKA_CA_FILE
+    acks: all                     # with an idempotent producer: no duplicates on retries
+    compression: gzip
+    heartbeat_s: 300
+    min_interval_s: 1
+    store_and_forward: true
+    spool_max_mb: 2048

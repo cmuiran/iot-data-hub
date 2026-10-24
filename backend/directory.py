@@ -27,7 +27,8 @@ from hub.models import LdapFile
 
 log = logging.getLogger(__name__)
 IN_CHAIN = "1.2.840.113556.1.4.1941"            # Active Directory: transitive membership
-PASSWORD_MARKER = "!directory"                  # password_hash of directory users: never matches
+# password_hash of directory users: not a password, an argon2 verify never matches it
+PASSWORD_MARKER = "!directory"  # nosec B105
 
 
 class DirectoryError(Exception):

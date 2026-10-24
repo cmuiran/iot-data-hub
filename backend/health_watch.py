@@ -219,6 +219,9 @@ class HealthWatch:
             paths.append(Path(s.backup_dir))
         if s.log_file:
             paths.append(Path(s.log_file).parent)
+        spool_dir = getattr(s, "spool_dir", None)       # store & forward needs room to grow
+        if spool_dir is not None and Path(spool_dir).exists():
+            paths.append(Path(spool_dir))
         return paths
 
     async def check_disks(self, now: datetime) -> list[CheckResult]:

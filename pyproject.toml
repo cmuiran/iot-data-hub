@@ -23,6 +23,7 @@ dependencies = [
     "python-snap7>=3.3,<4",    # Siemens S7 driver (pure Python, asyncio client; its server = the S7 simulator)
     "pysnmp>=7.1,<8",          # SNMP driver (v2c/v3, asyncio; its agent engine = the SNMP simulator)
     "ldap3>=2.9,<3",           # sign-in with Active Directory / LDAP (pure Python; config/ldap.yaml)
+    "aiokafka>=0.11,<1",       # Kafka output (asyncio producer; northbound.yaml kafka:)
 ]
 
 [project.optional-dependencies]

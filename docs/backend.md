@@ -628,3 +628,52 @@ CAs or `ca_file_env`.
 Turn it off again by removing `ldap.yaml` (or `enabled: false`) and reloading the
 configuration; existing directory users then cannot sign in until it is back.
 
+## 28. Store & forward (phase 7)
+
+Data that cannot be delivered yet waits on disk instead of in memory, survives a restart of the
+hub, and is delivered in order when the destination answers again.
+
+| Setting | Effect |
+|---|---|
+| `HUB_SPOOL_DIR` | folder for the queues (default `./spool`; `off` = memory only, the old behaviour) |
+| `HUB_SPOOL_MAX_MB` | size limit of the sample queue (1024); beyond it the oldest batches are dropped and counted |
+| `store_and_forward`, `spool_max_mb` per northbound / Kafka target | the same for each output (on, 512 MB) |
+
+* **Samples for the database** (`spool/samples.db`): when a write fails or the memory buffer
+  (`max_buffer`) is full, the buffered samples move to disk in batches. After the next
+  successful write the backlog is written in chunks (20 batches per flush, live data first)
+  until it is empty. Duplicates cannot occur in the history (primary key tag + time) and
+  `tag_latest` never goes back in time.
+* **Northbound MQTT / Kafka** (`spool/northbound-<name>.db`, `spool/kafka-<name>.db`): while the
+  broker is unreachable the memory queue spills to disk from half of `queue_max` on; after the
+  reconnect the disk queue is sent first, then the memory queue, so the order is kept. An item
+  leaves the disk only when the broker acknowledged it (at-least-once delivery).
+* Each queue is one SQLite file (`hub/spool.py`, WAL journal): a power cut loses at most the last
+  transaction, never the file.
+* Visible: health check `storage` turns into a warning with the number of batches on disk
+  (alarm `system:storage`), `hub_spool_batches` / `hub_spool_dropped_batches_total` in
+  `/metrics`, `spool_batches` in `/api/system/stats`, `on_disk` per output in
+  `/api/system/outputs`.
+* Disk space: the disk check (section 20) also covers the volume of the spool folder; size
+  `HUB_SPOOL_MAX_MB` for the longest outage you want to bridge (roughly 100 bytes per stored
+  sample).
+
+## 29. Kafka output (phase 7)
+
+`kafka:` in `config/northbound.yaml` (see `config/northbound.example.yaml`) publishes tag values
+to Apache Kafka with the same change detection, heartbeat and store & forward as northbound
+MQTT. Output only: the hub never reads from Kafka.
+
+| Item | Value |
+|---|---|
+| Topic | `topic` (default `hub.samples`) |
+| Key | the tag path (`kish.substation.meter_01.voltage_l1`): every tag stays in one partition, in order |
+| Value | JSON `{"tag", "v", "ts", "q", "u", "node"}` |
+| Delivery | `acks: all` with an idempotent producer (no duplicates from producer retries); a batch leaves the queue only after Kafka acknowledged every message, so after a reconnect a partly sent batch is sent again (at-least-once) |
+| Security | `SASL_SSL` (default, `sasl_mechanism` SCRAM-SHA-512 / SCRAM-SHA-256 / PLAIN, `username_env` + `password_env`) or `SSL` (optionally mutual TLS with `client_certificate_env` + `client_private_key_env`); the broker certificate is checked against `ca_file_env` or the system CAs. `PLAINTEXT` is refused unless `allow_plaintext: true` (closed lab networks only; the configuration check warns) |
+| Other | `compression` gzip/none, `linger_ms` (50), `bootstrap_servers` as `host:port` |
+
+Status per target: `GET /api/system/outputs` (`type: kafka`, `connected`, `queued`, `on_disk`,
+`published`, `dropped`, `reconnects`, `last_error`). The producer is aiokafka; the tests use a
+fake producer, so check the first connection to the real cluster during commissioning.
+
