@@ -74,3 +74,6 @@ spool/
 config/.trash/
 scripts/windows/hub-api-service.exe
 scripts/windows/hub-api-service.xml
+
+# Local full copies of the project (never commit: large, contains local databases)
+BackUp/
