@@ -29,6 +29,7 @@ from hub.models import (
     ModbusDevice,
     ModbusRtuDevice,
     MqttDevice,
+    NativeDevice,
     OpcUaDevice,
     Quality,
     QualityReason,
@@ -41,9 +42,9 @@ from hub.models import (
 log = logging.getLogger(__name__)
 
 AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
-             | SnmpDevice)
+             | SnmpDevice | NativeDevice)
 D = TypeVar("D", ModbusDevice, ModbusRtuDevice, MqttDevice, OpcUaDevice, S7Device, HttpDevice,
-            SnmpDevice)
+            SnmpDevice, NativeDevice)
 
 
 class DeviceState(StrEnum):

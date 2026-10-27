@@ -22,8 +22,9 @@ def _device_examples() -> list[str]:
 
 def test_cheatsheet_has_one_example_per_protocol() -> None:
     protocols = sorted(yaml.safe_load(b)["protocol"] for b in _device_examples())
-    # a new protocol needs its example; calculated devices are made on the Calculated tags page
-    assert protocols == sorted(set(PROTOCOLS) - {"calc"})
+    # a new protocol needs its example; calculated devices are made on the Calculated tags page,
+    # native (platform) devices are products registered by their manufacturer, not YAML
+    assert protocols == sorted(set(PROTOCOLS) - {"calc", "native"})
 
 
 @pytest.mark.parametrize("block", _device_examples(), ids=lambda b: b.split("\n")[0])

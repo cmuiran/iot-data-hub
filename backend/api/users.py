@@ -15,6 +15,7 @@ from backend.rbac import Principal
 from backend.security import hash_password
 from hub.drivers.base import utcnow
 from hub.models import SEGMENT_PATTERN
+from hub.platform.devices import PLATFORM_SITE
 from hub.storage.records import RoleGrant, UserRecord
 
 router = APIRouter(tags=["users"])
@@ -107,9 +108,13 @@ async def _check_grant(svc: ServicesDep, grant: GrantIn) -> None:
             raise Invalid("grant for an organization or for a site, not both",
                           code="invalid_scope")
         known = {o.id for o in svc.hub.report.building.organizations}
+        known |= await svc.store.platform.organization_ids()
         if grant.organization not in known:
-            raise Invalid(f"unknown organization {grant.organization} (config/building.yaml)",
-                          code="unknown_organization")
+            raise Invalid(f"unknown organization {grant.organization} (config/building.yaml "
+                          "or the platform)", code="unknown_organization")
+    if grant.site == PLATFORM_SITE:
+        raise Invalid(f"site {PLATFORM_SITE} holds platform devices: their access comes from "
+                      "the device's organizations, not from site grants", code="invalid_scope")
 
 
 async def _guard_last_admin(svc: ServicesDep, *, disabling: int | None = None,

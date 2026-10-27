@@ -119,6 +119,11 @@ programs with `hub.runtime.run()`, never bare `asyncio.run()`.
 - Protocol-specific addresses (Modbus register, OPC UA NodeId, MQTT topic/JSON path) live in the
   device config and map *to* a tag name; they never appear in tag names.
 - Validate names with a single shared regex/validator in `hub/models.py`; do not re-implement it.
+- **Platform devices** (products registered in the database, `hub/platform/`) use
+  `platform.devices.<generated device_id>.<tag key>`: the path never depends on the owner or the
+  location, so it survives a change of ownership or room. The site `platform` and ids of the form
+  `d` + 20 base32 characters are reserved; YAML devices may not use them (ADR-003 in
+  `docs/fa/platform/phase0-audit.md`).
 
 ## 5. Hard rules
 

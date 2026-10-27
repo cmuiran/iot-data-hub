@@ -5,7 +5,15 @@ A write request passes these gates, in order; the first failure rejects it:
 1. the tag exists and is active
 2. RBAC for the tag's site/area: ``tag.write``, or ``control.setpoint`` / ``control.command``
    matching the tag's write_class (unset = command)
-3. control is enabled: ``HUB_CONTROL_ENABLED``, the device is enabled, the tag is read_write
+3. control is enabled: ``HUB_CONTROL_ENABLED``, the device is enabled, the tag is read_write.
+   Platform devices (database products) instead of the site RBAC: ``device.operate`` in an
+   organization that owns the device or received it at level operator. Unrestricted
+   (global) grants do not count there: platform administrators do not drive customers'
+   devices.
+
+Every write is also a command (hub.storage.commands, command_id = request_id) whose status
+follows it: sent, delivered (protocol write done / device ack), executed (device ack),
+confirmed (value read back), or failed / expired.
 4. value: right type, inside the tag's min/max, representable in its raw type
 5. ``max_step``: change versus the current value (needs a current good value)
 6. ``min_interval_s`` since the last write to the tag
@@ -38,7 +46,17 @@ from backend.rbac import Principal, split_path, write_permission
 from backend.settings import Settings
 from hub.codec import CodecError, to_raw, values_equal
 from hub.drivers.base import DriverError, WriteGrant, utcnow
-from hub.models import Access, ControlFile, ControlPolicy, DataType, Interlock, Quality, TagBase
+from hub.models import (
+    Access,
+    ControlFile,
+    ControlPolicy,
+    DataType,
+    Interlock,
+    NativeDevice,
+    Quality,
+    TagBase,
+)
+from hub.platform.devices import PLATFORM_SITE
 from hub.runtime import Hub
 from hub.storage.postgres import PostgresStore
 
@@ -102,6 +120,7 @@ class ControlService:
             await asyncio.sleep(5)
             try:
                 await self.expire_pending()
+                await self.store.commands.expire(self.clock())
             except Exception:  # noqa: BLE001
                 log.exception("expiring pending writes failed")
 
@@ -125,8 +144,12 @@ class ControlService:
             username=principal.username, client_addr=client_addr, tag_path=tag_path,
             requested_value=value, result="requested", reason=reason)
         try:
-            site, area, _, _ = split_path(tag_path)
-            if not principal.can_write(tag.write_class, site, area):
+            site, area, device_id, _ = split_path(tag_path)
+            if site == PLATFORM_SITE:
+                if not await self._may_operate(principal, device_id):
+                    raise _Rejected("rejected_rbac", "no device.operate permission for this "
+                                    "device (owner or operator access)")
+            elif not principal.can_write(tag.write_class, site, area):
                 raise _Rejected("rejected_rbac", f"no {write_permission(tag.write_class)} "
                                 "permission for this area")
             raw = self._check(tag_path, tag, value, policy)
@@ -214,6 +237,16 @@ class ControlService:
 
     # --- gates --------------------------------------------------------------------------------
 
+    async def _may_operate(self, principal: Principal, device_id: str) -> bool:
+        """Platform device: device.operate through an organization grant of the caller, in an
+        organization with owner or operator access to the device."""
+        orgs = {g.org_id for g in principal.grants if g.org_id and "device.operate" in
+                principal.role_permissions.get(g.role_id, frozenset())}
+        if not orgs:
+            return False
+        levels = await self.store.accounts.access_levels(orgs, [device_id])
+        return levels.get(device_id) in ("owner", "operator")
+
     def tag_for(self, tag_path: str) -> TagBase:
         found = self.hub.tags.get(tag_path)
         if found is None:
@@ -284,11 +317,18 @@ class ControlService:
             previous = None
             with contextlib.suppress(Exception):
                 previous = await asyncio.wait_for(driver.read_tag(tag.name), self.io_timeout_s)
+            protocol = driver.device.protocol
+            wait_s = policy.readback_timeout_s
+            if isinstance(driver.device, NativeDevice):     # the device answers in its time
+                wait_s = max(wait_s, driver.device.connection.command_timeout_s)
+            await self.store.commands.create(
+                command_id=request_id, device_id=driver.device.device_id, tag_path=tag_path,
+                value=value, created_by=user_id,
+                expires_at=self.clock() + timedelta(seconds=wait_s + self.io_timeout_s))
             readback_task = None
-            if hasattr(driver, "read_back") and driver.device.protocol == "mqtt":
+            if hasattr(driver, "read_back") and protocol in ("mqtt", "native"):
                 # push protocol: start waiting for the next message before sending
-                readback_task = asyncio.create_task(driver.read_back(tag.name,
-                                                                     policy.readback_timeout_s))
+                readback_task = asyncio.create_task(driver.read_back(tag.name, wait_s))
                 await asyncio.sleep(0)
             self._last_write[tag_path] = self.clock()
             grant = WriteGrant(request_id=str(request_id), tag_path=tag_path, raw_value=raw)
@@ -306,11 +346,24 @@ class ControlService:
                 return await self._finish(request_id, user_id, username, client_addr, tag_path,
                                           value, "failed", f"{type(exc).__name__}: {exc}",
                                           previous=previous, confirmed_by=confirmed_by)
+            if protocol != "native":         # the protocol's write answer = delivered
+                await self.store.commands.advance(request_id, "delivered", self.clock(),
+                                                  transport=protocol)
             try:
                 if readback_task is not None:
                     readback = await readback_task
                 else:
                     readback = await driver.read_back(tag.name, policy.readback_timeout_s)
+            except TimeoutError:
+                if protocol != "native":
+                    return await self._finish(
+                        request_id, user_id, username, client_addr, tag_path, value,
+                        "readback_mismatch", "written, but read-back failed: ",
+                        previous=previous, confirmed_by=confirmed_by)
+                return await self._finish(request_id, user_id, username, client_addr, tag_path,
+                                          value, "timeout", "the device did not report the new "
+                                          "value in time; state unknown", previous=previous,
+                                          confirmed_by=confirmed_by)
             except Exception as exc:  # noqa: BLE001
                 return await self._finish(request_id, user_id, username, client_addr, tag_path,
                                           value, "readback_mismatch",
@@ -334,6 +387,10 @@ class ControlService:
         await self._audit_outcome(request_id, user_id, username, client_addr, tag_path, value,
                                   result, reason=message, previous=previous, readback=readback,
                                   confirmed_by=confirmed_by)
+        command = {"applied": "confirmed", "timeout": "expired"}.get(result, "failed")
+        with contextlib.suppress(Exception):      # the audit row above is the record that counts
+            await self.store.commands.advance(request_id, command, self.clock(),
+                                              error=None if command == "confirmed" else message)
         status: Status = {"applied": "applied", "readback_mismatch": "unverified",
                           "timeout": "unverified"}.get(result, "failed")  # type: ignore[assignment]
         level = logging.INFO if result == "applied" else logging.WARNING

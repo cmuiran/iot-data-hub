@@ -139,10 +139,18 @@ class AuthService:
     async def login(self, username: str, password: str, client_addr: str | None,
                     user_agent: str | None) -> TokenPair | MfaChallenge:
         now = self.clock()
-        username = username.strip().lower()
+        username = username.strip()
+        by_email = "@" in username       # self-registered accounts sign in with their e-mail
+        if not by_email:
+            username = username.lower()
         await self._check_throttle(username, client_addr, now)
-        user = await self.store.get_user_by_username(username)
-        if self.directory is not None and (user is None or user.auth_source == "ldap"):
+        if by_email:
+            user = await self.store.get_user_by_email(username)
+            username = user.username if user is not None else username.lower()
+        else:
+            user = await self.store.get_user_by_username(username)
+        if self.directory is not None and not by_email and (
+                user is None or user.auth_source == "ldap"):
             return await self._directory_login(username, password, user, client_addr,
                                                user_agent, now)
         if user is not None and user.auth_source == "ldap":
@@ -167,6 +175,10 @@ class AuthService:
         if not ok:
             await self._count_failure(user, client_addr, now, "login_failed", "wrong_password")
             raise Unauthorized("invalid username or password", code="invalid_credentials")
+        if user.email is not None and user.email_verified_at is None:
+            await self._failed(user, client_addr, "email_not_verified")
+            raise Unauthorized("confirm your e-mail address first (see the e-mail we sent)",
+                               code="email_not_verified")
 
         fields: dict[str, object] = {}
         if needs_rehash(user.password_hash):

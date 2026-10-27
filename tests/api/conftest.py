@@ -108,7 +108,10 @@ class Backend:
 
 def make_settings(**overrides: Any) -> Settings:
     base = {"jwt_secret": "x" * 40, "control_enabled": True, "login_max_failures": 3,
-            "lockout_minutes": 15, "password_min_length": 10}
+            "lockout_minutes": 15, "password_min_length": 10,
+            # the developer's disk is not what these tests check (tests/api/test_health_watch
+            # sets its own thresholds where the disk check itself is tested)
+            "disk_warn_percent": 0.5, "disk_critical_percent": 0.1}
     return Settings.model_validate(base | overrides)
 
 

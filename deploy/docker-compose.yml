@@ -1,0 +1,78 @@
+# Central platform in the cloud: hub + PostgreSQL/TimescaleDB + EMQX (device MQTT) + Caddy
+# (HTTPS with automatic certificates). Secrets come from deploy/.env (never committed): copy
+# deploy/.env.example to deploy/.env and fill it in. docs/fa/platform/deploy-cloud.md
+name: iot-platform
+
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hub
+      POSTGRES_USER: hub_app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in deploy/.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro     # creates the role hub_tenant once
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hub_app -d hub"]
+      interval: 10s
+      retries: 10
+    networks: [backend]                              # never published to the internet
+
+  hub:
+    build: {context: .., dockerfile: deploy/Dockerfile}
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    env_file: .env
+    environment:
+      HUB_DATABASE_URL: postgresql://hub_app:${DB_PASSWORD}@db:5432/hub
+      HUB_PLATFORM_BROKER: platform
+      HUB_TCP_INGEST_PORT: "7000"
+    volumes:
+      - ./config:/srv/hub/config                     # brokers.yaml (platform broker), YAML devices
+      - hub-spool:/srv/hub/spool
+      - ./certs:/srv/hub/certs:ro                    # TLS for the TCP device port
+    ports:
+      - "7000:7000"                                  # TCP/TLS for native devices
+    networks: [backend, edge]
+
+  emqx:
+    image: emqx/emqx:5.8.4
+    restart: unless-stopped
+    environment:
+      EMQX_NODE__NAME: emqx@127.0.0.1
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?set EMQX_DASHBOARD_PASSWORD}
+      HUB_BROKER_HOOK_TOKEN: ${HUB_BROKER_HOOK_TOKEN:?set HUB_BROKER_HOOK_TOKEN}
+    volumes:
+      - ./emqx/base.hocon:/opt/emqx/etc/base.hocon:ro
+      - emqx-data:/opt/emqx/data
+      - ./certs:/opt/emqx/etc/certs:ro
+    ports:
+      - "8883:8883"                                  # MQTT over TLS for devices (no plain 1883)
+    networks: [backend, edge]                        # hooks to the hub over backend
+
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    depends_on: [hub]
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST, e.g. hub.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [edge]
+
+volumes:
+  db-data: {}
+  hub-spool: {}
+  emqx-data: {}
+  caddy-data: {}
+
+networks:
+  backend: {internal: true}                          # db and broker hooks: no internet route
+  edge: {}

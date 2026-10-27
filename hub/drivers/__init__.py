@@ -25,6 +25,7 @@ from hub.models import (
     ModbusDevice,
     ModbusRtuDevice,
     MqttDevice,
+    NativeDevice,
     OpcUaDevice,
     S7Device,
     SnmpDevice,
@@ -82,6 +83,10 @@ def create_driver(
         from hub.drivers.iec104 import Iec104Driver
 
         return Iec104Driver(device, on_samples, on_status, clock=clock)
+    if isinstance(device, NativeDevice):     # without a channel: receives, cannot be written
+        from hub.drivers.native import NativeDriver
+
+        return NativeDriver(device, on_samples, on_status, clock=clock)
     raise DriverError(f"no driver for protocol {device.protocol!r}")
 
 

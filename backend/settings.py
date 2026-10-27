@@ -15,12 +15,20 @@ from hub.maintenance import MaintenanceSettings
 from hub.paths import program_path
 
 BUNDLED_FRONTEND = program_path("frontend")
+BUNDLED_APP = program_path("app")
 
 
 def _frontend_dir(value: str | None) -> Path | None:
     """HUB_FRONTEND_DIR: unset = the bundled dashboard, "off" = API only, else a directory."""
     if value is None or value == "":
         return BUNDLED_FRONTEND if (BUNDLED_FRONTEND / "index.html").is_file() else None
+    return None if value.strip().lower() == "off" else Path(value)
+
+
+def _app_dir(value: str | None) -> Path | None:
+    """HUB_APP_DIR: unset = the bundled consumer app, "off" = not served, else a directory."""
+    if value is None or value == "":
+        return BUNDLED_APP if (BUNDLED_APP / "index.html").is_file() else None
     return None if value.strip().lower() == "off" else Path(value)
 
 
@@ -97,6 +105,8 @@ class Settings(BaseModel):
     cert_warn_days: int = Field(default=30, ge=1, le=365)
     # web dashboard (frontend/), served at / by hub-api
     frontend_dir: Path | None = Field(default_factory=lambda: _frontend_dir(None))
+    # consumer app (app/, platform phase 5), served at /app; "off" = not served
+    app_dir: Path | None = Field(default_factory=lambda: _app_dir(None))
     # operations (phase 4): structured logs, syslog, health checks, restore tests
     log_format: Literal["text", "json"] = "text"
     syslog: str | None = None  # udp://host:514 | tcp://host:601
@@ -112,6 +122,28 @@ class Settings(BaseModel):
     # store & forward (phase 7): data that cannot be delivered waits on disk, not in memory
     spool_dir: Path | None = None
     spool_max_mb: int = Field(default=1024, ge=10, le=1_000_000)
+    # self-service accounts (platform phase 2): off by default; invitations work regardless
+    signup_enabled: bool = False
+    public_url: str | None = None               # base of the links in e-mails
+    smtp_host: str | None = None                # unset: e-mails are not sent (logged only)
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    mail_from: str = "no-reply@localhost"
+    verify_hours: int = Field(default=48, ge=1, le=24 * 14)
+    reset_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    invitation_days: int = Field(default=7, ge=1, le=90)
+    account_ip_per_hour: int = Field(default=20, ge=1, le=10_000)     # per address and action
+    account_email_per_hour: int = Field(default=3, ge=1, le=100)      # e-mails per address
+    # platform device contract (phase 4): TCP listener, platform MQTT broker, broker hooks
+    tcp_ingest_host: str = "0.0.0.0"  # nosec B104 - devices connect from the network
+    tcp_ingest_port: int | None = Field(default=None, ge=0, le=65535)   # None: off
+    tcp_ingest_insecure: bool = False           # plain TCP without TLS (development only)
+    platform_broker: str | None = None          # broker_id in brokers.yaml for native devices
+    platform_topic_prefix: str = ""
+    platform_shared_group: str | None = None    # $share/<group>/ for several hub nodes
+    broker_hook_token: str | None = None        # header X-Hub-Hook-Token of the broker hooks
 
     @field_validator("syslog")
     @classmethod
@@ -171,6 +203,13 @@ class Settings(BaseModel):
             ZoneInfo(value)
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"unknown time zone {value!r}") from exc
+        return value
+
+    @field_validator("broker_hook_token")
+    @classmethod
+    def _check_hook_token(cls, value: str | None) -> str | None:
+        if value is not None and len(value) < 24:
+            raise ValueError("HUB_BROKER_HOOK_TOKEN must be at least 24 characters")
         return value
 
     @field_validator("metrics_token")
@@ -250,6 +289,7 @@ class Settings(BaseModel):
             allowed_origins=_list(e.get("HUB_ALLOWED_ORIGINS")),
             cert_warn_days=int(e.get("HUB_CERT_WARN_DAYS", 30)),
             frontend_dir=_frontend_dir(e.get("HUB_FRONTEND_DIR")),
+            app_dir=_app_dir(e.get("HUB_APP_DIR")),
             log_format=e.get("HUB_LOG_FORMAT", "text"),  # type: ignore[arg-type]
             syslog=e.get("HUB_SYSLOG") or None,
             syslog_facility=e.get("HUB_SYSLOG_FACILITY", "local0"),
@@ -263,6 +303,27 @@ class Settings(BaseModel):
             restore_test_days=int(e.get("HUB_RESTORE_TEST_DAYS", 7)),
             spool_dir=_spool_dir(e.get("HUB_SPOOL_DIR")),
             spool_max_mb=int(e.get("HUB_SPOOL_MAX_MB", 1024)),
+            signup_enabled=_bool(e.get("HUB_SIGNUP_ENABLED"), False),
+            public_url=(e.get("HUB_PUBLIC_URL") or "").rstrip("/") or None,
+            smtp_host=e.get("HUB_SMTP_HOST") or None,
+            smtp_port=int(e.get("HUB_SMTP_PORT", 587)),
+            smtp_security=e.get("HUB_SMTP_SECURITY", "starttls"),  # type: ignore[arg-type]
+            smtp_user=e.get("HUB_SMTP_USERNAME") or None,
+            smtp_password=e.get("HUB_SMTP_PASSWORD") or None,
+            mail_from=e.get("HUB_MAIL_FROM", "no-reply@localhost"),
+            verify_hours=int(e.get("HUB_VERIFY_HOURS", 48)),
+            reset_minutes=int(e.get("HUB_RESET_MINUTES", 60)),
+            invitation_days=int(e.get("HUB_INVITATION_DAYS", 7)),
+            account_ip_per_hour=int(e.get("HUB_ACCOUNT_IP_PER_HOUR", 20)),
+            account_email_per_hour=int(e.get("HUB_ACCOUNT_EMAIL_PER_HOUR", 3)),
+            tcp_ingest_host=e.get("HUB_TCP_INGEST_HOST", "0.0.0.0"),  # nosec B104
+            tcp_ingest_port=int(e["HUB_TCP_INGEST_PORT"]) if e.get("HUB_TCP_INGEST_PORT")
+            else None,
+            tcp_ingest_insecure=_bool(e.get("HUB_TCP_INGEST_INSECURE"), False),
+            platform_broker=e.get("HUB_PLATFORM_BROKER") or None,
+            platform_topic_prefix=e.get("HUB_PLATFORM_TOPIC_PREFIX", ""),
+            platform_shared_group=e.get("HUB_PLATFORM_SHARED_GROUP") or None,
+            broker_hook_token=e.get("HUB_BROKER_HOOK_TOKEN") or None,
         )
 
 

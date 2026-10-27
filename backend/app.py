@@ -17,18 +17,23 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import (
+    account,
     auth,
+    automations,
     calc,
     config,
     control,
     dashboards,
     data,
+    ingest,
     metrics,
     model,
+    platform,
     reports,
     schedules,
     system,
     users,
+    versions,
     ws,
 )
 from backend.errors import ApiError
@@ -58,6 +63,58 @@ def _ui_csp(request: Request) -> str:
 API_VERSION = "1"
 SUPPORTED_VERSIONS = ("1",)
 _VERSIONED = re.compile(r"^/api/v(\d+)(/.*)?$")
+
+
+MAX_BODY = 1024 * 1024                      # API and device messages
+MAX_FIRMWARE_BODY = 16 * 1024 * 1024 + 4096  # POST /api/platform/products/{id}/firmware
+_FIRMWARE_UPLOAD = re.compile(r"^/api(/v\d+)?/platform/products/[^/]+/firmware$")
+
+
+class BodyLimit:
+    """Refuse request bodies over the limit (413) before they are read into memory; also when
+    the client sends no Content-Length (chunked): the body is counted while it arrives."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = MAX_FIRMWARE_BODY if _FIRMWARE_UPLOAD.match(scope["path"]) else MAX_BODY
+        headers = dict(scope.get("headers") or [])
+        declared = headers.get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > limit:
+            await self._refuse(send, limit)
+            return
+        seen = 0
+
+        async def counted() -> Any:
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > limit:
+                    raise _TooLarge
+            return message
+
+        try:
+            await self.app(scope, counted, send)
+        except _TooLarge:
+            await self._refuse(send, limit)
+
+    @staticmethod
+    async def _refuse(send: Any, limit: int) -> None:
+        body = json.dumps({"error": "too_large",
+                           "message": f"request body over {limit} bytes"}).encode()
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+class _TooLarge(Exception):
+    pass
 
 
 class ApiVersions:
@@ -181,11 +238,17 @@ def create_app(services: Services) -> FastAPI:
         return JSONResponse({"error": "internal", "message": "internal server error"},
                             status_code=500)
 
-    for module in (auth, users, data, control, config, model, calc, dashboards, reports,
-                   schedules, system, metrics, ws):
+    for module in (auth, account, automations, users, data, control, config, model, calc,
+                   platform, ingest, versions, dashboards, reports, schedules, system,
+                   metrics, ws):
         app.include_router(module.router)
+    if services.settings.app_dir is not None and (services.settings.app_dir / "index.html"
+                                                   ).is_file():
+        app.mount("/app", _FrontendFiles(directory=services.settings.app_dir, html=True),
+                  name="app")                       # the consumer app (before "/")
     _mount_frontend(app, services.settings.frontend_dir)
-    app.add_middleware(ApiVersions)   # outermost: /api/v1 is mapped before the guards run
+    app.add_middleware(ApiVersions)   # /api/v1 is mapped before the guards run
+    app.add_middleware(BodyLimit)     # outermost: oversized bodies never reach the app
     return app
 
 

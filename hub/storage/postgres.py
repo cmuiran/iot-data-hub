@@ -154,6 +154,24 @@ class PostgresStore:
                                          open=False, kwargs={"row_factory": dict_row})
         self._tag_ids: dict[str, int] = {}
         self._tag_types: dict[int, str] = {}
+        from hub.storage.platform import PlatformStore
+
+        self.platform = PlatformStore(self)      # products, platform devices (0009)
+        from hub.storage.accounts import AccountStore
+
+        self.accounts = AccountStore(self)       # sign-up, invitations, sharing (0010)
+        from hub.storage.claims import ClaimStore
+
+        self.claims = ClaimStore(self)           # claim codes, credentials, edge hubs (0011)
+        from hub.storage.commands import CommandStore
+
+        self.commands = CommandStore(self)       # the life of every command (0012)
+        from hub.storage.automations import AutomationStore
+
+        self.automations = AutomationStore(self)  # scenes, automations, holidays (0013)
+        from hub.storage.versions import VersionStore
+
+        self.versions = VersionStore(self)       # template upgrades, firmware (0014)
 
     async def open(self) -> None:
         await self._pool.open(wait=True, timeout=30)
@@ -174,7 +192,8 @@ class PostgresStore:
     # --- config sync --------------------------------------------------------------------------
 
     async def sync_config(self, devices: Sequence[AnyDevice]) -> dict[str, TagRecord]:
-        """Mirror the YAML config: upsert devices/tags, retire what disappeared."""
+        """Mirror the YAML config: upsert devices/tags, retire what disappeared. Platform
+        devices (source 'platform', from the database) are never touched."""
         async with self._conn() as conn, conn.transaction():
             for d in devices:
                 connection = getattr(d, "connection", None)    # calc devices have none
@@ -185,7 +204,7 @@ class PostgresStore:
                     "ON CONFLICT (device_id) DO UPDATE SET name=EXCLUDED.name, site=EXCLUDED.site,"
                     " area=EXCLUDED.area, protocol=EXCLUDED.protocol, enabled=EXCLUDED.enabled,"
                     " connection=EXCLUDED.connection, description=EXCLUDED.description,"
-                    " updated_at=now(), retired_at=NULL",
+                    " updated_at=now(), retired_at=NULL WHERE devices.source = 'config'",
                     (d.device_id, d.name, d.site, d.area, d.protocol, d.enabled,
                      Jsonb(conn_json), d.description),
                 )
@@ -214,7 +233,8 @@ class PostgresStore:
                     (d.device_id,))
             await conn.execute(
                 "UPDATE devices SET retired_at=now() WHERE retired_at IS NULL "
-                "AND NOT (device_id = ANY(%s))", ([d.device_id for d in devices],))
+                "AND source = 'config' AND NOT (device_id = ANY(%s))",
+                ([d.device_id for d in devices],))
             await conn.execute(
                 "UPDATE tags SET retired_at=now() WHERE retired_at IS NULL AND device_id IN "
                 "(SELECT device_id FROM devices WHERE retired_at IS NOT NULL)")
@@ -253,6 +273,20 @@ class PostgresStore:
         self._tag_ids = {p: r.tag_id for p, r in records.items()}
         self._tag_types = {r.tag_id: str(r.data_type) for r in records.values()}
         return records
+
+    async def refresh_device_tags(self, device_id: str) -> None:
+        """Refresh the tag ids of one device (a platform device started, changed or stopped)
+        without reading the whole tag table."""
+        async with self._conn() as conn:
+            rows = await (await conn.execute(
+                "SELECT tag_id, tag_path, data_type FROM tag_paths WHERE device_id=%s",
+                (device_id,))).fetchall()
+        prefix = f".{device_id}."
+        for path in [p for p in self._tag_ids if prefix in p]:
+            del self._tag_ids[path]
+        for r in rows:
+            self._tag_ids[r["tag_path"]] = r["tag_id"]
+            self._tag_types[r["tag_id"]] = str(r["data_type"])
 
     # --- samples ------------------------------------------------------------------------------
 
@@ -455,6 +489,12 @@ class PostgresStore:
         async with self._conn() as conn:
             row = await (await conn.execute("SELECT * FROM users WHERE user_id=%s",
                                             (user_id,))).fetchone()
+        return UserRecord.model_validate(row) if row else None
+
+    async def get_user_by_email(self, email: str) -> UserRecord | None:
+        async with self._conn() as conn:
+            row = await (await conn.execute("SELECT * FROM users WHERE lower(email)=lower(%s)",
+                                            (email,))).fetchone()
         return UserRecord.model_validate(row) if row else None
 
     async def get_user_by_username(self, username: str) -> UserRecord | None:
@@ -1067,7 +1107,8 @@ class PostgresStore:
             for org in b.organizations:
                 await conn.execute(
                     "INSERT INTO organizations (org_id, name) VALUES (%s,%s) ON CONFLICT (org_id)"
-                    " DO UPDATE SET name=EXCLUDED.name, updated_at=now(), retired_at=NULL",
+                    " DO UPDATE SET name=EXCLUDED.name, updated_at=now(), retired_at=NULL"
+                    " WHERE organizations.source = 'config'",
                     (org.id, org.name))
             await conn.execute("DELETE FROM organization_sites")
             for org in b.organizations:
@@ -1120,8 +1161,11 @@ class PostgresStore:
                         "haystack, brick_class) SELECT %s, %s, tag_id, %s, %s, %s FROM tag_paths "
                         "WHERE tag_path=%s",
                         (e.id, p.role, p.description, list(p.haystack), p.brick_class, p.tag))
+            await conn.execute(      # platform organizations are not in building.yaml
+                "UPDATE organizations SET retired_at=now() WHERE retired_at IS NULL "
+                "AND source = 'config' AND NOT (org_id = ANY(%s))",
+                ([o.id for o in b.organizations],))
             for table, key, ids in (
-                    ("organizations", "org_id", [o.id for o in b.organizations]),
                     ("locations", "location_id", [loc.id for loc in b.locations]),
                     ("building_systems", "system_id", [s.id for s in b.systems]),
                     ("equipment", "equipment_id", [e.id for e in b.equipment])):

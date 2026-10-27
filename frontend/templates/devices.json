@@ -306,5 +306,27 @@
         }
       }
     ]
+  },
+  "native": {
+    "device_id": "new_native_device",
+    "name": "Platform device",
+    "site": "kish",
+    "area": "area",
+    "protocol": "native",
+    "enabled": false,
+    "connection": {
+      "transports": [
+        "mqtt",
+        "http",
+        "tcp"
+      ],
+      "stale_after_s": 300
+    },
+    "tags": [
+      {
+        "name": "value",
+        "data_type": "float32"
+      }
+    ]
   }
 }

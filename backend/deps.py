@@ -35,12 +35,12 @@ PrincipalDep = Annotated[Principal, Depends(principal)]
 
 
 def require_writer() -> Callable[..., Coroutine[Any, Any, Principal]]:
-    """Any write permission (tag.write, control.setpoint or control.command) somewhere; the
-    control-safety layer checks the right one for the tag."""
+    """Any write permission (tag.write, control.setpoint, control.command, or device.operate
+    for platform devices) somewhere; the control-safety layer checks the right one."""
     any_write = require("self")
 
     async def _check(p: Principal = Depends(any_write)) -> Principal:  # noqa: B008
-        if not p.can_write_anything():
+        if not p.can_write_anything() and not p.can("device.operate"):
             raise Forbidden("missing permission tag.write / control.setpoint / control.command")
         return p
 

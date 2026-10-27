@@ -1,0 +1,72 @@
+{
+  "fa": {
+    "verify": {
+      "subject": "تأیید نشانی ایمیل",
+      "body": "{name} عزیز،\n\nبرای فعال شدن حساب، این پیوند را باز کنید:\n{link}\n\nاین پیوند تا {hours} ساعت معتبر است. اگر شما ثبت‌نام نکرده‌اید، این پیام را نادیده بگیرید."
+    },
+    "account_exists": {
+      "subject": "تلاش برای ثبت‌نام با ایمیل شما",
+      "body": "سلام،\n\nکسی با این نشانی ایمیل ثبت‌نام کرد، اما برای آن از قبل حساب وجود دارد. اگر خودتان بودید، وارد شوید یا رمز را از این پیوند بازیابی کنید:\n{link}\n\nاگر شما نبودید، کاری لازم نیست."
+    },
+    "reset": {
+      "subject": "بازیابی رمز عبور",
+      "body": "{name} عزیز،\n\nبرای انتخاب رمز جدید این پیوند را باز کنید:\n{link}\n\nاین پیوند تا {minutes} دقیقه معتبر است و فقط یک بار کار می‌کند. پس از تغییر رمز، همهٔ نشست‌های باز بسته می‌شوند. اگر شما درخواست نداده‌اید، این پیام را نادیده بگیرید."
+    },
+    "invite_organization": {
+      "subject": "دعوت به {org}",
+      "body": "سلام،\n\n{inviter} شما را به «{org}» دعوت کرده است (نقش: {role}).\nبرای پذیرفتن، این پیوند را باز کنید و با همین نشانی ایمیل وارد شوید یا حساب بسازید:\n{link}\n\nاین دعوت تا {days} روز معتبر است."
+    },
+    "invite_device": {
+      "subject": "دستگاهی با شما به اشتراک گذاشته شد",
+      "body": "سلام،\n\n{inviter} دستگاه «{device}» را با شما به اشتراک گذاشته است (سطح: {level}).\nبرای پذیرفتن، این پیوند را باز کنید و با همین نشانی ایمیل وارد شوید یا حساب بسازید:\n{link}\n\nاین دعوت تا {days} روز معتبر است."
+    },
+    "automation": {
+      "subject": "اتوماسیون «{name}»",
+      "body": "{text}\n\n(این پیام را اتوماسیون «{name}» فرستاده است.)"
+    },
+    "roles": {
+      "customer_owner": "مالک",
+      "customer_member": "عضو",
+      "customer_viewer": "فقط مشاهده",
+      "manufacturer_admin": "مدیر محصول",
+      "production_operator": "اپراتور تولید",
+      "manufacturer_support": "پشتیبانی"
+    },
+    "levels": {"operator": "کنترل", "viewer": "فقط مشاهده"}
+  },
+  "en": {
+    "verify": {
+      "subject": "Confirm your e-mail address",
+      "body": "Dear {name},\n\nOpen this link to activate your account:\n{link}\n\nThe link is valid for {hours} hours. If you did not sign up, ignore this message."
+    },
+    "account_exists": {
+      "subject": "Sign-up attempt with your e-mail address",
+      "body": "Hello,\n\nSomeone tried to sign up with this e-mail address, which already has an account. If it was you, sign in, or reset your password here:\n{link}\n\nIf it was not you, nothing needs to be done."
+    },
+    "reset": {
+      "subject": "Reset your password",
+      "body": "Dear {name},\n\nOpen this link to choose a new password:\n{link}\n\nThe link is valid for {minutes} minutes and works once. Changing the password signs out every open session. If you did not ask for this, ignore this message."
+    },
+    "invite_organization": {
+      "subject": "Invitation to {org}",
+      "body": "Hello,\n\n{inviter} invited you to \"{org}\" (role: {role}).\nTo accept, open this link and sign in, or create an account, with this e-mail address:\n{link}\n\nThe invitation is valid for {days} days."
+    },
+    "invite_device": {
+      "subject": "A device was shared with you",
+      "body": "Hello,\n\n{inviter} shared the device \"{device}\" with you (access: {level}).\nTo accept, open this link and sign in, or create an account, with this e-mail address:\n{link}\n\nThe invitation is valid for {days} days."
+    },
+    "automation": {
+      "subject": "Automation \"{name}\"",
+      "body": "{text}\n\n(Sent by the automation \"{name}\".)"
+    },
+    "roles": {
+      "customer_owner": "owner",
+      "customer_member": "member",
+      "customer_viewer": "viewer",
+      "manufacturer_admin": "product manager",
+      "production_operator": "production operator",
+      "manufacturer_support": "support"
+    },
+    "levels": {"operator": "operate", "viewer": "view only"}
+  }
+}

@@ -62,6 +62,7 @@ from hub.models import (
     ModbusServerFile,
     ModbusTag,
     MqttDevice,
+    NativeDevice,
     NorthboundFile,
     NotificationsFile,
     OpcUaDevice,
@@ -89,7 +90,7 @@ LDAP_FILE = "ldap.yaml"
 BUILDING_FILE = "building.yaml"
 
 AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
-             | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
+             | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device | NativeDevice)
 
 
 class Severity(StrEnum):
@@ -390,6 +391,17 @@ def _check_device_ids(report: ConfigReport) -> None:
                     f"duplicate device_id {device_id!r} (also defined in {others})",
                     "device_id",
                 )
+    # platform devices (database) use this site and generated ids: YAML may not (ADR-003)
+    from hub.platform.devices import PLATFORM_SITE, is_platform_device_id
+
+    for loaded in report.devices:
+        if loaded.device.site == PLATFORM_SITE:
+            report.add(Severity.ERROR, loaded.source,
+                       f"site {PLATFORM_SITE!r} is reserved for platform devices", "site")
+        if is_platform_device_id(loaded.device.device_id):
+            report.add(Severity.ERROR, loaded.source,
+                       f"device_id {loaded.device.device_id!r} has the form of a generated "
+                       "platform device id (d + 20 characters); choose another", "device_id")
 
 
 def _tag_loc(index: int, name: str, field_name: str | None = None) -> str:

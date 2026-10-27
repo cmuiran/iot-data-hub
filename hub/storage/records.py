@@ -74,6 +74,8 @@ class UserRecord(_Record):
     password_changed_at: datetime | None = None
     auth_source: str = "local"          # local | ldap (Active Directory)
     external_dn: str | None = None
+    email: str | None = None             # self-registered accounts (0010)
+    email_verified_at: datetime | None = None
 
 
 class RoleGrant(_Record):

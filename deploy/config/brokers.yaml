@@ -1,0 +1,9 @@
+# The platform broker the hub reads native devices from (HUB_PLATFORM_BROKER=platform).
+brokers:
+  - broker_id: platform
+    host: emqx
+    port: 8883
+    tls: true
+    tls_server_name: hub.example.com      # the name in the broker certificate
+    username_env: HUB_PLATFORM_MQTT_USERNAME
+    password_env: HUB_PLATFORM_MQTT_PASSWORD

@@ -1,0 +1,42 @@
+# EMQX for native devices: TLS only, every device signs in with its own credential and may use
+# its own topics only - both decided by the hub (backend/api/ingest.py broker hooks).
+listeners.tcp.default.enable = false
+listeners.ssl.default {
+  bind = "0.0.0.0:8883"
+  ssl_options {
+    certfile = "/opt/emqx/etc/certs/server.crt"
+    keyfile = "/opt/emqx/etc/certs/server.key"
+    versions = ["tlsv1.3", "tlsv1.2"]
+  }
+}
+
+# The hub's own account (HUB_PLATFORM_BROKER in brokers.yaml) is in the built-in database,
+# created once in the dashboard; devices are checked by the hub.
+authentication = [
+  {mechanism = password_based, backend = built_in_database, user_id_type = username},
+  {
+    mechanism = password_based
+    backend = http
+    method = post
+    url = "http://hub:8000/ingest/v1/broker/auth"
+    headers {"content-type" = "application/json", "X-Hub-Hook-Token" = "${HUB_BROKER_HOOK_TOKEN}"}
+    body {username = "${username}", password = "${password}", clientid = "${clientid}"}
+  }
+]
+
+authorization {
+  no_match = deny
+  deny_action = disconnect
+  sources = [
+    {type = built_in_database, enable = true},
+    {
+      type = http
+      method = post
+      url = "http://hub:8000/ingest/v1/broker/acl"
+      headers {"content-type" = "application/json", "X-Hub-Hook-Token" = "${HUB_BROKER_HOOK_TOKEN}"}
+      body {username = "${username}", topic = "${topic}", action = "${action}"}
+    }
+  ]
+}
+
+mqtt.max_packet_size = 64KB

@@ -37,6 +37,13 @@ def test_up_down_up(database_url: str) -> None:
     assert set(NEW_TABLES) <= _tables(database_url)
     assert {"control.setpoint", "control.command", "calc.publish"} <= _permissions(database_url)
 
+    rollback(database_url, "0014_versions_firmware")
+    rollback(database_url, "0013_automations")
+    rollback(database_url, "0012_commands_ingest")
+
+    rollback(database_url, "0011_claims")              # the newer migrations first
+    rollback(database_url, "0010_accounts_sharing")
+    rollback(database_url, "0009_platform_core")
     rollback(database_url, "0008_building_model")
     assert not set(NEW_TABLES) & _tables(database_url)
     assert "control.setpoint" not in _permissions(database_url)
@@ -47,13 +54,23 @@ def test_up_down_up(database_url: str) -> None:
         assert conn.execute("SELECT count(*) FROM schema_migrations WHERE version="
                             "'0008_building_model'").fetchone()[0] == 0
 
-    assert migrate(database_url) == ["0008_building_model"]
+    assert migrate(database_url) == ["0008_building_model", "0009_platform_core",
+                                     "0010_accounts_sharing", "0011_claims",
+                                     "0012_commands_ingest",
+                                     "0013_automations",
+                                     "0014_versions_firmware"]
     assert set(NEW_TABLES) <= _tables(database_url)
 
 
 def test_rollback_rules(database_url: str) -> None:
     with pytest.raises(RollbackError, match="no rollback script"):
         rollback(database_url, "0007_directory_users")
+    rollback(database_url, "0014_versions_firmware")
+    rollback(database_url, "0013_automations")
+    rollback(database_url, "0012_commands_ingest")
+    rollback(database_url, "0011_claims")
+    rollback(database_url, "0010_accounts_sharing")
+    rollback(database_url, "0009_platform_core")
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute("INSERT INTO devices (device_id, name, site, area, protocol) "
                      "VALUES ('calc_x', 'C', 'kish', 'energy', 'calc')")

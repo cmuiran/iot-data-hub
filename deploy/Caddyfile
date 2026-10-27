@@ -1,0 +1,10 @@
+# HTTPS in front of the hub (certificates from Let's Encrypt automatically).
+{$PUBLIC_HOST} {
+	encode gzip
+	# the hub sets its own security headers (CSP, nosniff, frame denial); HSTS here
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	# the broker hooks are for EMQX inside the backend network only
+	@hooks path /ingest/v1/broker/*
+	respond @hooks 404
+	reverse_proxy hub:8000
+}

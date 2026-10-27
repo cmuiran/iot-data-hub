@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 class LoginIn(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
+    username: str = Field(min_length=1, max_length=254)     # or the e-mail address
     password: str = Field(min_length=1, max_length=256)
 
 
@@ -51,6 +51,7 @@ class MeOut(BaseModel):
     roles: list[dict[str, str | None]]
     permissions: dict[str, list[dict[str, str | None]]]
     auth_source: str = "local"
+    email: str | None = None
 
 
 class MfaChallengeOut(BaseModel):
@@ -134,7 +135,8 @@ async def me(p: Annotated[Principal, Depends(require("self"))]) -> MeOut:
                  language=p.user.language, must_change_password=p.user.must_change_password,
                  mfa_enabled=p.user.totp_enabled, mfa_enrollment_required=p.mfa_missing,
                  roles=[{"role": g.role_id, "site": g.site, "area": g.area} for g in p.grants],
-                 permissions=p.effective(), auth_source=p.user.auth_source)
+                 permissions=p.effective(), auth_source=p.user.auth_source,
+                 email=p.user.email)
 
 
 @router.post("/change-password", status_code=204)

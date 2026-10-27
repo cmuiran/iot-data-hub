@@ -1367,14 +1367,37 @@ class CalcDevice(DeviceBase):
     tags: list[CalcTag] = Field(default_factory=list)
 
 
+class NativeTag(TagBase):
+    """A tag of the platform device contract: the device reports it by its key, no address."""
+
+
+class NativeConnection(_Strict):
+    """The platform device contract (docs/platform.md, phase 4): the device itself connects
+    with its credential over MQTT, HTTP or TCP and sends ``{"values": {<tag>: value}}``."""
+
+    transports: list[Literal["mqtt", "http", "tcp"]] = Field(
+        default_factory=lambda: ["mqtt", "http", "tcp"], min_length=1)
+    stale_after_s: float | None = Field(
+        default=300, gt=0, le=86_400,
+        description="no message for this long -> offline and values bad")
+    command_timeout_s: float = Field(default=30, gt=0, le=3600,
+                                     description="a command not executed by then expires")
+
+
+class NativeDevice(DeviceBase):
+    protocol: Literal["native"]
+    connection: NativeConnection = Field(default_factory=NativeConnection)
+    tags: list[NativeTag] = Field(default_factory=list)
+
+
 AnyModbusDevice = ModbusDevice | ModbusRtuDevice
 AnyDeviceModel = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device
                   | HttpDevice | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device
-                  | CalcDevice)
+                  | NativeDevice | CalcDevice)
 Device = Annotated[AnyDeviceModel, Field(discriminator="protocol")]
 DEVICE_ADAPTER: TypeAdapter[AnyDeviceModel] = TypeAdapter(Device)
 PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp", "fins", "mc",
-             "enip", "iec104", "calc")
+             "enip", "iec104", "native", "calc")
 
 
 # --------------------------------------------------------------------------------------------

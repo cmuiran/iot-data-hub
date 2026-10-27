@@ -34,7 +34,15 @@ from hub.drivers import Driver, DriverError, create_driver
 from hub.drivers.base import AnyDevice, Clock, DeviceState, DeviceStatus, utcnow
 from hub.drivers.calc import CalcDriver
 from hub.history import HistoryFilter
-from hub.models import Broker, CalcDevice, Quality, QualityReason, Sample, TagBase
+from hub.models import (
+    Broker,
+    CalcDevice,
+    NativeDevice,
+    Quality,
+    QualityReason,
+    Sample,
+    TagBase,
+)
 from hub.spool import DiskQueue
 
 log = logging.getLogger(__name__)
@@ -130,6 +138,8 @@ class Hub:
     # store & forward: samples the database cannot take wait here instead of being dropped
     spool: DiskQueue | None = None
     spool_drain_batches: int = 20   # spooled batches written per flush (live data first)
+    # where commands to native devices go (backend.ingest.Ingest); set by the backend
+    native_channel: Any = None
 
     latest: dict[str, Sample] = field(default_factory=dict)
     statuses: dict[str, DeviceStatus] = field(default_factory=dict)
@@ -137,6 +147,8 @@ class Hub:
     stats: HubStats = field(default_factory=HubStats)
 
     def __post_init__(self) -> None:
+        # platform devices come from the database (hub.storage.platform), not from the report
+        self.platform_devices: dict[str, AnyDevice] = {}
         self.devices: dict[str, AnyDevice] = {d.device.device_id: d.device
                                                for d in self.report.devices}
         self.tags: dict[str, tuple[AnyDevice, TagBase]] = self.report.tags_by_path()
@@ -166,6 +178,7 @@ class Hub:
         if self.store is not None:
             await self.store.sync_config(list(self.devices.values()))
             await self._sync_building(self.report)
+            await self._load_platform_devices()
             open_alarms = await self.store.open_alarm_sources()
             self.alarms.restore({src: rec.kind for src, rec in open_alarms.items()})
         if self.calc is not None:
@@ -203,7 +216,8 @@ class Hub:
         """
         if report.has_errors:
             raise RuntimeError("configuration has errors; not applied")
-        new_devices = {d.device.device_id: d.device for d in report.devices}
+        config_devices = {d.device.device_id: d.device for d in report.devices}
+        new_devices = config_devices | self.platform_devices      # platform devices stay
         old_brokers = self.report.brokers
         changes: dict[str, list[str]] = {"added": [], "removed": [], "restarted": [],
                                          "unchanged": []}
@@ -220,12 +234,12 @@ class Hub:
             changes["removed"].append(device_id)
 
         if self.store is not None:
-            await self.store.sync_config(list(new_devices.values()))
+            await self.store.sync_config(list(config_devices.values()))
             await self._sync_building(report)
 
         self.report = report
         self.devices = new_devices
-        self.tags = report.tags_by_path()
+        self.tags = self._all_tags()
         for path in [p for p in self.latest if p not in self.tags]:
             del self.latest[path]
 
@@ -266,7 +280,75 @@ class Hub:
                  {k: v for k, v in changes.items() if v and k != "unchanged"})
         return changes
 
+    # --- platform devices ----------------------------------------------------------------------
+
+    def _all_tags(self) -> dict[str, tuple[AnyDevice, TagBase]]:
+        tags = self.report.tags_by_path()
+        for device in self.platform_devices.values():
+            for tag in device.tags:
+                tags[device.tag_path(tag.name)] = (device, tag)
+        return tags
+
+    async def _load_platform_devices(self) -> None:
+        platform = getattr(self.store, "platform", None)
+        if platform is None:
+            return
+        try:
+            models = await platform.device_models()
+        except Exception:  # noqa: BLE001 - the configured devices must run regardless
+            log.exception("could not load the platform devices")
+            return
+        self.platform_devices = {d.device_id: d for d in models}
+        self.devices |= self.platform_devices
+        self.tags = self._all_tags()
+        for device_id in self.platform_devices:
+            self.statuses[device_id] = DeviceStatus(device_id)
+
+    async def apply_platform_device(self, device_id: str, device: AnyDevice | None) -> str:
+        """Start, restart or stop one platform device without reloading the configuration
+        (``device`` None or disabled = stop). Returns added / restarted / removed / unchanged."""
+        if device is not None and not device.enabled:
+            device = None
+        old = self.platform_devices.get(device_id)
+        if device is not None and old == device and device_id in self.drivers:
+            return "unchanged"
+        driver = self.drivers.pop(device_id, None)
+        if driver is not None:
+            await driver.stop()
+        if device is None:
+            self.platform_devices.pop(device_id, None)
+            self.devices.pop(device_id, None)
+            self.statuses.pop(device_id, None)
+            self.tags = self._all_tags()
+            for path in [p for p in self.latest if p not in self.tags]:
+                del self.latest[path]
+            outcome = "removed" if old is not None else "unchanged"
+        else:
+            self.platform_devices[device_id] = device
+            self.devices[device_id] = device
+            self.statuses[device_id] = DeviceStatus(device_id)
+            self.tags = self._all_tags()
+            for path in [p for p in self.latest if p not in self.tags]:
+                del self.latest[path]
+            if self._running:
+                new = self._create_driver(device, self.report.brokers)
+                self.drivers[device_id] = new
+                await new.start()
+            outcome = "restarted" if old is not None else "added"
+        refresh = getattr(self.store, "refresh_device_tags", None)   # the sample writer's ids
+        if refresh is not None:
+            await refresh(device_id)
+        self.bus.publish({"type": "config", "action": "platform_device", "device": device_id,
+                          "outcome": outcome})
+        log.info("platform device %s %s", device_id, outcome)
+        return outcome
+
     def _create_driver(self, device: AnyDevice, brokers: dict[str, Broker]) -> Driver:
+        if isinstance(device, NativeDevice):     # devices that connect to the hub themselves
+            from hub.drivers.native import NativeDriver
+
+            return NativeDriver(device, self._on_samples, self._on_status,
+                                channel=self.native_channel, clock=self.clock)
         if isinstance(device, CalcDevice):
             return CalcDriver(device, self._on_samples, self._on_status, engine=self.calc,
                               clock=self.clock)

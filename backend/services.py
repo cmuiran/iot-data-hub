@@ -38,6 +38,12 @@ class Services:
     northbound: Any = None      # backend.northbound.Northbound (config/northbound.yaml)
     health_watch: Any = None    # backend.health_watch.HealthWatch (system health alarms)
     modbus_server: Any = None   # backend.modbus_server.HubModbusServer
+    accounts: Any = None        # backend.accounts.AccountService (sign-up, invitations, shares)
+    claims: Any = None          # backend.claims.ClaimService (labels, claims, edge hubs)
+    ingest: Any = None          # backend.ingest.Ingest (native devices: MQTT / HTTP / TCP)
+    tcp_ingest: Any = None      # backend.tcp_ingest.TcpIngest (HUB_TCP_INGEST_PORT)
+    automations: Any = None     # backend.automations.AutomationEngine (scenes, automations)
+    versions: Any = None        # backend.versions.VersionService (upgrades, firmware)
 
     def __post_init__(self) -> None:
         from backend.config_admin import ConfigAdmin
@@ -70,6 +76,37 @@ class Services:
             from backend.modbus_server import HubModbusServer
 
             self.modbus_server = HubModbusServer(self)
+        if self.accounts is None:
+            from backend.accounts import AccountService
+            from backend.mailer import make_mailer
+            self.accounts = AccountService(self.store, self.settings, self.auth,
+                                           make_mailer(self.settings))
+        if self.claims is None:
+            from backend.claims import ClaimService
+            self.claims = ClaimService(self)
+        if self.ingest is None:
+            from backend.ingest import Ingest
+            self.ingest = Ingest(self)
+        self.hub.native_channel = self.ingest
+        if self.tcp_ingest is None:
+            from backend.tcp_ingest import TcpIngest
+            self.tcp_ingest = TcpIngest.from_settings(self.ingest, self.settings)
+        if self.ingest.mqtt is None and self.settings.platform_broker:
+            from backend.mqtt_ingest import MqttIngest
+            broker = self.report.brokers.get(self.settings.platform_broker)
+            if broker is None:
+                raise RuntimeError(f"HUB_PLATFORM_BROKER={self.settings.platform_broker}: no "
+                                   "such broker in brokers.yaml")
+            self.ingest.mqtt = MqttIngest(self.ingest, broker,
+                                          prefix=self.settings.platform_topic_prefix,
+                                          shared_group=self.settings.platform_shared_group,
+                                          node_id=self.settings.node_id)
+        if self.automations is None:
+            from backend.automations import AutomationEngine
+            self.automations = AutomationEngine(self)
+        if self.versions is None:
+            from backend.versions import VersionService
+            self.versions = VersionService(self)
         if self.maintenance is None:
             self.maintenance = Maintenance(self.store, self.settings.maintenance(),
                                            database_url=self.settings.database_url,
@@ -93,10 +130,16 @@ class Services:
         self.role = "active"
         await self.hub.start()
         await self.control.start()
+        if self.tcp_ingest is not None:
+            await self.tcp_ingest.start()
+        if self.ingest.mqtt is not None:
+            await self.ingest.mqtt.start()
         if self.notifier is not None:
             await self.notifier.start()
         if self.scheduler is not None:
             await self.scheduler.start()
+        if self.automations is not None:
+            await self.automations.start()
         if self.opcua_server is not None:
             await self.opcua_server.start()
         if self.northbound is not None:
@@ -193,9 +236,15 @@ class Services:
             await self.northbound.stop()
         if self.scheduler is not None:
             await self.scheduler.stop()
+        if self.automations is not None:
+            await self.automations.stop()
         if self.maintenance is not None:
             await self.maintenance.stop()
         if self.notifier is not None:
             await self.notifier.stop()
+        if self.tcp_ingest is not None:
+            await self.tcp_ingest.stop()
+        if self.ingest is not None:
+            await self.ingest.close()
         await self.control.stop()
         await self.hub.stop()

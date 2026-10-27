@@ -6,6 +6,10 @@ site + area. A permission is allowed for a target (site, area) if some grant who
 the permission covers that target. Global permissions (user management, config, audit, model,
 calculations) need a grant with no restriction at all.
 
+Platform permissions (products, device registration) are organization permissions: allowed in
+an organization by a grant for that organization, or by an unrestricted grant; site grants do
+not count. :meth:`Principal.orgs_with` gives the organizations (None = all).
+
 Writes: ``tag.write`` allows every write; ``control.setpoint`` / ``control.command`` allow only
 writes to tags of that write class (a tag without write_class counts as a command).
 """
@@ -19,10 +23,13 @@ from hub.models import WriteClass
 from hub.storage.records import RoleGrant, UserRecord
 
 GLOBAL_PERMISSIONS = frozenset({"user.manage", "config.edit", "audit.read", "model.edit",
-                                "calc.publish"})
+                                "calc.publish", "org.manage"})
+ORG_PERMISSIONS = frozenset({"product.read", "product.manage", "device.register",
+                             "device.view", "device.operate", "device.share", "org.members",
+                             "automation.manage"})
 SCOPED_PERMISSIONS = frozenset({"data.read", "tag.write", "write.confirm", "alarm.ack",
                                 "control.setpoint", "control.command", "maintenance.write"})
-ALL_PERMISSIONS = GLOBAL_PERMISSIONS | SCOPED_PERMISSIONS
+ALL_PERMISSIONS = GLOBAL_PERMISSIONS | SCOPED_PERMISSIONS | ORG_PERMISSIONS
 WRITE_PERMISSIONS = frozenset({"tag.write", "control.setpoint", "control.command"})
 
 
@@ -77,6 +84,8 @@ class Principal:
         scopes = self._scopes_for(permission)
         if permission in GLOBAL_PERMISSIONS:
             return any(s.unrestricted for s in scopes)
+        if permission in ORG_PERMISSIONS:        # "in some organization?"; see orgs_with
+            return any(s.unrestricted or s.org for s in scopes)
         if site is None:  # "anywhere at all?" (e.g. may this user see the alarm list)
             return bool(scopes)
         return any(s.covers(site, area, self.site_orgs) for s in scopes)
@@ -88,6 +97,17 @@ class Principal:
 
     def can_write_anything(self) -> bool:
         return any(self.can(p) for p in WRITE_PERMISSIONS)
+
+    def orgs_with(self, permission: str) -> set[str] | None:
+        """Organizations where an organization permission is allowed; None = every one."""
+        scopes = self._scopes_for(permission)
+        if any(s.unrestricted for s in scopes):
+            return None
+        return {s.org for s in scopes if s.org}
+
+    def can_in_org(self, permission: str, org_id: str) -> bool:
+        orgs = self.orgs_with(permission)
+        return orgs is None or org_id in orgs
 
     def organizations(self) -> set[str] | None:
         """Organizations whose data the user may read; None = no restriction."""
@@ -102,6 +122,13 @@ class Principal:
         out: dict[str, list[dict[str, str | None]]] = {}
         for permission in sorted(ALL_PERMISSIONS):
             scopes = self._scopes_for(permission)
+            if permission in ORG_PERMISSIONS:
+                orgs = self.orgs_with(permission)
+                if orgs is None:
+                    out[permission] = [{"site": None, "area": None}]
+                elif orgs:
+                    out[permission] = [{"org": o} for o in sorted(orgs)]
+                continue
             if permission in GLOBAL_PERMISSIONS:
                 scopes = [s for s in scopes if s.unrestricted]
             # organization scopes are listed as their sites (that is what clients check)

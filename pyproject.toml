@@ -54,6 +54,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["hub*", "backend*", "simulators*"]
 
+[tool.setuptools.package-data]
+backend = ["messages/*.json"]      # account e-mail texts (fa/en)
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

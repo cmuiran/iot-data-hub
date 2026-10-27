@@ -112,6 +112,7 @@
   "mc": "Mitsubishi MC (MELSEC)",
   "enip": "EtherNet/IP (Logix)",
   "iec104": "IEC 60870-5-104",
+  "native": "دستگاه پلتفرم (MQTT / HTTP / TCP)",
   "calc": "محاسباتی"
  },
  "roles": {
