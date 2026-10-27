@@ -16,7 +16,7 @@ import {
   tagLabel, stateBadge, severityBadge, qualityBadge, confirmDialog, empty, unitText, areaName, protoBadge,
 } from '../ui.js';
 import { sparkline, timeChart, legend, seriesClass } from '../chart.js';
-import { store, bus, canTag, isNumeric, tagsOfDevice, severityRank, deviceLastSeen } from '../store.js';
+import { store, bus, isNumeric, tagsOfDevice, severityRank, deviceLastSeen, canWriteTag } from '../store.js';
 import { openWriteDialog } from '../control-dialog.js';
 
 const TYPES = ['value', 'gauge', 'trend', 'state', 'alarms', 'command', 'note'];
@@ -144,7 +144,7 @@ function renderCommand(w, body) {
   const tag = store.tags.get(w.tag);
   if (!tag) { mount(body, notice(t('dash.tag_missing', { tag: w.tag || '—' }), 'warn')); return {}; }
   const big = h('div', { class: 'big' });
-  const allowed = tag.access === 'read_write' && canTag('tag.write', w.tag);
+  const allowed = tag.access === 'read_write' && canWriteTag(tag);
   mount(body, big, allowed ? button(t('device.command'), () => openWriteDialog(w.tag), { kind: 'primary', iconName: 'control' })
     : h('span', { class: 'tiny faint' }, t('dash.no_command_right')));
   const update = () => { const cur = store.tags.get(w.tag); mount(big, valueNode(cur, cur.value)); };

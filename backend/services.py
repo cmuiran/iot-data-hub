@@ -84,6 +84,7 @@ class Services:
                                   settings.spool_max_mb * 2**20)
         auth = AuthService(store, settings)
         auth.use_directory(report.ldap)
+        auth.site_orgs = lambda: hub.report.building_model.site_orgs
         return cls(settings=settings, report=report, store=store, hub=hub, auth=auth,
                    control=ControlService(hub, store, report.control, settings))
 

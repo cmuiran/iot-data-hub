@@ -5,6 +5,7 @@ Data path::
     driver -> Hub._on_samples -> latest cache  -> LiveBus (WebSocket clients)
                               -> AlarmEngine   -> store (alarm_events) + LiveBus
                               -> write buffer  -> store.write_samples (batched, retried)
+                              -> CalcEngine    -> calculated tags -> Hub._on_samples
 
 Nothing on this path waits for the database: samples are buffered (bounded; the oldest are
 dropped and counted if the database is down for long) and written in batches by one task.
@@ -27,11 +28,13 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from hub.alarms import AlarmEngine, AlarmRaise
+from hub.calc.engine import CalcEngine
 from hub.config_loader import ConfigReport
 from hub.drivers import Driver, DriverError, create_driver
 from hub.drivers.base import AnyDevice, Clock, DeviceState, DeviceStatus, utcnow
+from hub.drivers.calc import CalcDriver
 from hub.history import HistoryFilter
-from hub.models import Quality, Sample, TagBase
+from hub.models import Broker, CalcDevice, Quality, QualityReason, Sample, TagBase
 from hub.spool import DiskQueue
 
 log = logging.getLogger(__name__)
@@ -139,11 +142,14 @@ class Hub:
         self.tags: dict[str, tuple[AnyDevice, TagBase]] = self.report.tags_by_path()
         self.drivers: dict[str, Driver] = {}
         self.alarms = AlarmEngine(self.report.alarms, self._raise_alarm, self._clear_alarm)
+        self.calc: CalcEngine | None = self._make_calc(self.report)
         self.history = HistoryFilter()
         # async callbacks receiving alarm events (notifications); errors are logged, not raised
         self.alarm_listeners: list[Callable[[dict[str, Any]], Any]] = []
         self._buffer: deque[Sample] = deque()
         self._status_dirty: dict[str, DeviceStatus] = {}
+        # (ts, device_id, state, message) waiting for the store (collection_errors)
+        self._collection_errors: deque[tuple[datetime, str, str, str]] = deque(maxlen=1000)
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._running = False
@@ -159,20 +165,25 @@ class Hub:
             self.stats.spool_batches = self.spool.count
         if self.store is not None:
             await self.store.sync_config(list(self.devices.values()))
+            await self._sync_building(self.report)
             open_alarms = await self.store.open_alarm_sources()
             self.alarms.restore({src: rec.kind for src, rec in open_alarms.items()})
+        if self.calc is not None:
+            await self._seed_calc(self.calc)
         self._running = True
         self._tasks = [asyncio.create_task(self._writer(), name="hub:writer"),
                        asyncio.create_task(self._ticker(), name="hub:alarm-ticker")]
         for device in self.devices.values():
-            driver = self.driver_factory(device, self._on_samples, self._on_status,
-                                         brokers=self.report.brokers, clock=self.clock)
-            self.drivers[device.device_id] = driver
+            self.drivers[device.device_id] = self._create_driver(device, self.report.brokers)
         await asyncio.gather(*(d.start() for d in self.drivers.values()))
+        if self.calc is not None:
+            await self.calc.start()
         log.info("hub started: %d devices, %d tags", len(self.devices), len(self.tags))
 
     async def stop(self) -> None:
         self._running = False
+        if self.calc is not None:
+            await self.calc.stop()
         await asyncio.gather(*(d.stop() for d in self.drivers.values()), return_exceptions=True)
         self._wake.set()
         for task in self._tasks:
@@ -198,7 +209,7 @@ class Hub:
                                          "unchanged": []}
 
         def broker_changed(device: AnyDevice) -> bool:
-            ref = getattr(device.connection, "broker_ref", None)
+            ref = getattr(getattr(device, "connection", None), "broker_ref", None)
             return ref is not None and old_brokers.get(ref) != report.brokers.get(ref)
 
         for device_id in sorted(set(self.devices) - set(new_devices)):
@@ -210,6 +221,7 @@ class Hub:
 
         if self.store is not None:
             await self.store.sync_config(list(new_devices.values()))
+            await self._sync_building(report)
 
         self.report = report
         self.devices = new_devices
@@ -217,9 +229,20 @@ class Hub:
         for path in [p for p in self.latest if p not in self.tags]:
             del self.latest[path]
 
+        old_calc, self.calc = self.calc, self._make_calc(report)
+        if old_calc is not None:
+            await old_calc.stop()
+        if self.calc is not None:
+            if old_calc is not None:
+                self.calc.adopt(old_calc)
+            else:
+                await self._seed_calc(self.calc)
+
         for device_id, device in sorted(new_devices.items()):
             old = self.drivers.get(device_id)
             if old is not None and old.device == device and not broker_changed(device):
+                if isinstance(old, CalcDriver):
+                    old.engine = self.calc         # results now come from the new engine
                 changes["unchanged"].append(device_id)
                 continue
             if old is not None:
@@ -228,8 +251,7 @@ class Hub:
             else:
                 changes["added"].append(device_id)
             self.statuses[device_id] = DeviceStatus(device_id)
-            driver = self.driver_factory(device, self._on_samples, self._on_status,
-                                         brokers=report.brokers, clock=self.clock)
+            driver = self._create_driver(device, report.brokers)
             self.drivers[device_id] = driver
             await driver.start()
 
@@ -237,10 +259,47 @@ class Hub:
         if self.store is not None:
             open_alarms = await self.store.open_alarm_sources()
             self.alarms.restore({src: rec.kind for src, rec in open_alarms.items()})
+        if self.calc is not None and self._running:
+            await self.calc.start()
         self.bus.publish({"type": "config", "action": "reloaded", **changes})
         log.info("configuration reloaded: %s",
                  {k: v for k, v in changes.items() if v and k != "unchanged"})
         return changes
+
+    def _create_driver(self, device: AnyDevice, brokers: dict[str, Broker]) -> Driver:
+        if isinstance(device, CalcDevice):
+            return CalcDriver(device, self._on_samples, self._on_status, engine=self.calc,
+                              clock=self.clock)
+        return self.driver_factory(device, self._on_samples, self._on_status,
+                                   brokers=brokers, clock=self.clock)
+
+    async def _sync_building(self, report: ConfigReport) -> None:
+        sync = getattr(self.store, "sync_building", None)
+        if sync is not None:
+            await sync(report.building)
+
+    def _make_calc(self, report: ConfigReport) -> CalcEngine | None:
+        devices = {d.device.device_id for d in report.devices}
+        defs = {p: d for p, d in report.calcs.items() if d.device_id in devices}
+        if not defs:     # (a report may be cut down to some devices, e.g. hub-commission read)
+            return None
+        return CalcEngine(defs, [p for p in report.calc_order if p in defs], self._on_samples,
+                          self.clock)
+
+    async def _seed_calc(self, engine: CalcEngine) -> None:
+        """Inputs from the live cache; running totals (integrate/runtime) from the last stored
+        result, so counters continue after a restart instead of starting from zero."""
+        engine.seed(self.latest.values())
+        latest = getattr(self.store, "latest", None)
+        if latest is None:
+            return
+        try:
+            rows = await latest(list(engine.defs))
+        except Exception:  # noqa: BLE001 - a fresh start from zero beats not starting
+            log.exception("could not read the last results of the calculated tags")
+            return
+        engine.seed(Sample(tag=r.tag_path, value=r.value, timestamp=r.ts, quality=r.quality)
+                    for r in rows if r.value is not None)
 
     async def __aenter__(self) -> Hub:
         await self.start()
@@ -265,6 +324,9 @@ class Hub:
 
     async def _on_samples(self, samples: list[Sample]) -> None:
         self.stats.samples_received += len(samples)
+        received = self.clock()
+        samples = [s if s.received_at is not None else
+                   s.model_copy(update={"received_at": received}) for s in samples]
         for s in samples:
             previous = self.latest.get(s.tag)
             if previous is None or s.timestamp >= previous.timestamp:
@@ -295,6 +357,8 @@ class Hub:
             await self.alarms.on_samples(samples)
         except Exception:  # noqa: BLE001 - alarms must never break data collection
             log.exception("alarm evaluation failed")
+        if self.calc is not None:
+            self.calc.feed(samples)
 
     async def _on_status(self, status: DeviceStatus) -> None:
         old = self.statuses.get(status.device_id)
@@ -302,6 +366,10 @@ class Hub:
         if old is None or old.state != status.state or old.last_error != status.last_error:
             self.bus.publish(status_event(status))
             self._status_dirty[status.device_id] = status
+            if status.state in (DeviceState.OFFLINE, DeviceState.ERROR) and status.last_error:
+                self._collection_errors.append((status.last_error_at or self.clock(),
+                                                status.device_id, str(status.state),
+                                                status.last_error))
         elif status.state is DeviceState.ONLINE:
             self._status_dirty[status.device_id] = status  # keep last_seen fresh (batched)
         try:
@@ -405,6 +473,15 @@ class Hub:
         except Exception:
             self._status_dirty = dirty | self._status_dirty
             raise
+        add_errors = getattr(self.store, "add_collection_errors", None)
+        if self._collection_errors and add_errors is not None:
+            errors = list(self._collection_errors)   # taken before awaiting: flushes overlap
+            self._collection_errors.clear()
+            try:
+                await add_errors(errors)
+            except Exception:
+                self._collection_errors.extendleft(reversed(errors))
+                raise
 
 
     # --- store & forward -------------------------------------------------------------------
@@ -447,13 +524,19 @@ class Hub:
 
 
 def encode_samples(samples: list[Sample]) -> bytes:
-    return json.dumps([[s.tag, s.timestamp.isoformat(), s.value, str(s.quality)]
+    return json.dumps([[s.tag, s.timestamp.isoformat(), s.value, str(s.quality),
+                        s.reason and str(s.reason)]
                        for s in samples], separators=(",", ":")).encode()
 
 
 def decode_samples(blob: bytes) -> list[Sample]:
-    return [Sample(tag=tag, timestamp=datetime.fromisoformat(ts), value=value,
-                   quality=Quality(quality)) for tag, ts, value, quality in json.loads(blob)]
+    out = []
+    for row in json.loads(blob):          # rows spooled by older versions have no reason
+        tag, ts, value, quality, *rest = row
+        out.append(Sample(tag=tag, timestamp=datetime.fromisoformat(ts), value=value,
+                          quality=Quality(quality),
+                          reason=QualityReason(rest[0]) if rest and rest[0] else None))
+    return out
 
 
 _WSAENOTSOCK = 10038

@@ -21,6 +21,7 @@ from typing import TextIO
 from hub.config_loader import (
     ALARMS_FILE,
     BROKERS_FILE,
+    BUILDING_FILE,
     CONTROL_FILE,
     DEVICES_DIR,
     NOTIFICATIONS_FILE,
@@ -30,7 +31,7 @@ from hub.config_loader import (
 )
 
 _FILE_LABELS = {BROKERS_FILE: "(brokers)", ALARMS_FILE: "(alarms)", CONTROL_FILE: "(control)",
-                NOTIFICATIONS_FILE: "(notify)"}
+                NOTIFICATIONS_FILE: "(notify)", BUILDING_FILE: "(building)"}
 
 
 def _status(report: ConfigReport, source: str) -> str:

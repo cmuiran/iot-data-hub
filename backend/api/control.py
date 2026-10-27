@@ -9,13 +9,13 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
 
 from backend.control import WriteResult
-from backend.deps import ServicesDep, client_addr, require
+from backend.deps import ServicesDep, client_addr, require, require_writer
 from backend.errors import NotFound
 from backend.rbac import Principal, split_path
 from hub.storage.records import PendingWrite
 
 router = APIRouter(prefix="/api/control", tags=["control"])
-Writer = Annotated[Principal, Depends(require("tag.write"))]
+Writer = Annotated[Principal, Depends(require_writer())]
 Confirmer = Annotated[Principal, Depends(require("self"))]
 
 

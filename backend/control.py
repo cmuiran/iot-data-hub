@@ -3,7 +3,8 @@
 A write request passes these gates, in order; the first failure rejects it:
 
 1. the tag exists and is active
-2. RBAC: ``tag.write`` for the tag's site/area
+2. RBAC for the tag's site/area: ``tag.write``, or ``control.setpoint`` / ``control.command``
+   matching the tag's write_class (unset = command)
 3. control is enabled: ``HUB_CONTROL_ENABLED``, the device is enabled, the tag is read_write
 4. value: right type, inside the tag's min/max, representable in its raw type
 5. ``max_step``: change versus the current value (needs a current good value)
@@ -33,7 +34,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from backend.errors import Conflict, Forbidden, NotFound
-from backend.rbac import Principal, split_path
+from backend.rbac import Principal, split_path, write_permission
 from backend.settings import Settings
 from hub.codec import CodecError, to_raw, values_equal
 from hub.drivers.base import DriverError, WriteGrant, utcnow
@@ -125,8 +126,9 @@ class ControlService:
             requested_value=value, result="requested", reason=reason)
         try:
             site, area, _, _ = split_path(tag_path)
-            if not principal.can("tag.write", site, area):
-                raise _Rejected("rejected_rbac", "no tag.write permission for this area")
+            if not principal.can_write(tag.write_class, site, area):
+                raise _Rejected("rejected_rbac", f"no {write_permission(tag.write_class)} "
+                                "permission for this area")
             raw = self._check(tag_path, tag, value, policy)
         except _Rejected as rej:
             return await self._reject(request_id, principal, client_addr, tag_path, value, rej)

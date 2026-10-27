@@ -215,7 +215,8 @@ class HubModbusServer:
             return None
         return Principal(user=account, session_id=None,
                          grants=tuple(await store.grants(account.user_id)),
-                         role_permissions=await store.role_permissions())
+                         role_permissions=await store.role_permissions(),
+                         site_orgs=self.services.auth.site_orgs())
 
     # --- protocol -----------------------------------------------------------------------------
 

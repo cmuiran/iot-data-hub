@@ -22,7 +22,9 @@
   "config_devices": "Devices",
   "config_rules": "Alarm and control rules",
   "audit": "Audit log",
-  "system": "System"
+  "system": "System",
+  "building": "Building",
+  "calc": "Calculated tags"
  },
  "common": {
   "apply": "Apply",
@@ -109,13 +111,15 @@
   "fins": "Omron FINS",
   "mc": "Mitsubishi MC (MELSEC)",
   "enip": "EtherNet/IP (Logix)",
-  "iec104": "IEC 60870-5-104"
+  "iec104": "IEC 60870-5-104",
+  "calc": "Calculated"
  },
  "roles": {
   "admin": "Administrator",
   "engineer": "Engineer",
   "operator": "Operator",
-  "viewer": "Viewer"
+  "viewer": "Viewer",
+  "setpoint_operator": "Setpoint operator"
  },
  "limits": {
   "hihi": "Very high",
@@ -700,7 +704,10 @@
   "enable": "Enable account",
   "username_placeholder": "e.g. op.rahimi",
   "source_ldap": "Active Directory",
-  "ldap_roles_note": "This user signs in with Active Directory. Their roles come from their directory groups at every sign-in (config/ldap.yaml) and cannot be changed here; the password is changed in Active Directory."
+  "ldap_roles_note": "This user signs in with Active Directory. Their roles come from their directory groups at every sign-in (config/ldap.yaml) and cannot be changed here; the password is changed in Active Directory.",
+  "organization": "Organization",
+  "no_org": "— (site / area below)",
+  "scope_org": "organization {org}"
  },
  "cfg": {
   "devices_title": "Devices",
@@ -978,5 +985,116 @@
   "end": "End session",
   "end_text": "Sign out that browser?",
   "ldap_password_note": "You signed in with your company account (Active Directory). Change the password in Windows or ask IT."
+ },
+ "quality_reason": {
+  "comm_failure": "communication failure",
+  "out_of_range": "out of range",
+  "stale": "stale input",
+  "config_error": "configuration error",
+  "device_reported": "reported by the device",
+  "math_error": "calculation error",
+  "input_bad": "input missing or bad",
+  "manual": "set manually"
+ },
+ "write_class": {
+  "setpoint": "Setpoint",
+  "command": "Command"
+ },
+ "location_kind": {
+  "campus": "Campus",
+  "building": "Building",
+  "floor": "Floor",
+  "zone": "Zone",
+  "room": "Room"
+ },
+ "equipment_status": {
+  "in_service": "In service",
+  "maintenance": "Maintenance",
+  "out_of_service": "Out of service",
+  "retired": "Retired"
+ },
+ "maintenance_kind": {
+  "inspection": "Inspection",
+  "preventive": "Preventive maintenance",
+  "corrective": "Repair",
+  "calibration": "Calibration",
+  "replacement": "Replacement",
+  "note": "Note"
+ },
+ "building": {
+  "title": "Building",
+  "tree": "Locations",
+  "empty": "No building model yet (config/building.yaml).",
+  "col_equipment": "Equipment",
+  "col_type": "Type",
+  "col_place": "Place",
+  "col_status": "Status",
+  "col_role": "Point",
+  "col_received": "Received",
+  "site": "Site",
+  "organization": "Organization",
+  "level": "Floor number",
+  "area_m2": "Area (m²)",
+  "no_equipment": "No equipment here.",
+  "open_device": "Device",
+  "manufacturer": "Manufacturer",
+  "model": "Model",
+  "serial_number": "Serial number",
+  "installed_on": "Installed",
+  "warranty_until": "Warranty until",
+  "system": "System",
+  "documents": "Documents",
+  "points": "Points",
+  "no_points": "No points.",
+  "maintenance": "Maintenance history",
+  "add_record": "Add record",
+  "no_records": "No records yet.",
+  "performed_at": "Date",
+  "kind": "Kind",
+  "description": "Description",
+  "performed_by": "Performed by",
+  "work_order": "Work order",
+  "entered_by": "Entered by",
+  "record_saved": "Record saved",
+  "record_incomplete": "Enter a date and a description."
+ },
+ "calc": {
+  "title": "Calculated tags",
+  "intro": "Values computed by the hub from other tags with a checked formula (units, data types, missing inputs). Each change of a formula is kept as a version.",
+  "empty": "No calculated tags yet.",
+  "new": "New calculated tag",
+  "edit_title": "Edit {tag}",
+  "col_tag": "Tag",
+  "col_formula": "Formula",
+  "col_version": "Version",
+  "versions": "Versions",
+  "versions_of": "Versions of {tag}",
+  "valid_from": "In force from",
+  "no_versions": "No versions stored yet.",
+  "site": "Site",
+  "area": "Area",
+  "device": "Calculation device",
+  "name": "Tag name",
+  "description": "Description",
+  "formula": "Formula",
+  "formula_hint": "e.g. p1 + p2 · if(flow > 0[m3/h], p / flow, 0) · tr - ts · integrate(p) · runtime(running) · sum_of(\"building_a\", \"active_power\")",
+  "unit": "Unit",
+  "data_type": "Result",
+  "number": "Number",
+  "condition": "Condition (true/false)",
+  "missing": "Missing input",
+  "missing_bad": "Result is bad",
+  "missing_skip": "Leave it out (aggregates)",
+  "inputs": "Inputs",
+  "add_input": "Add input",
+  "preview": "Preview",
+  "publish": "Publish",
+  "preview_result": "Result now:",
+  "invalid": "Formula not valid",
+  "at_char": "character {n}",
+  "bad_ids": "Site, area, device and name: lowercase letters, digits and _ only.",
+  "bad_alias": "Input names: lowercase letters, digits and _ (at most 32).",
+  "not_calc_device": "That device is not a calculation device.",
+  "published": "Published"
  }
 }

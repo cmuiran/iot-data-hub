@@ -7,7 +7,7 @@ import {
   h, mount, table, button, badge, modal, field, input, select, checkbox, notice, errorText, toast,
   confirmDialog, tagLabel, parseNumber, empty,
 } from '../ui.js';
-import { store, can, canTag } from '../store.js';
+import { store, can, canWriteTag } from '../store.js';
 
 const CRON_PRESETS = [
   ['0 6 * * *', 'cron_daily_6'], ['0 * * * *', 'cron_hourly'], ['*/15 * * * *', 'cron_15min'],
@@ -22,7 +22,7 @@ function parseValue(tag, text) {
 
 function stepEditor(steps) {
   const box = h('div', { class: 'stack tight' });
-  const writable = [...store.tags.values()].filter((tg) => tg.access === 'read_write' && canTag('tag.write', tg.tag));
+  const writable = [...store.tags.values()].filter((tg) => tg.access === 'read_write' && canWriteTag(tg));
   const readable = [...store.tags.values()];
   const draw = () => {
     mount(box, steps.map((st, i) => {

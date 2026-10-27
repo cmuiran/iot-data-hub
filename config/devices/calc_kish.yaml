@@ -1,0 +1,74 @@
+# Calculated tags of the Kish site (computed by the hub: hub/calc, docs/calculated-tags.md).
+# Read-only; history, alarms, dashboards and reports treat them like any other tag.
+device_id: calc_kish
+name: Site calculations
+site: kish
+area: energy
+protocol: calc
+description: Totals, efficiencies and counters computed from the field devices.
+tags:
+  - name: site_power
+    description: Grid import plus solar generation (load of the site).
+    unit: kW
+    data_type: float64
+    formula: grid + solar
+    inputs:
+      grid: kish.substation.meter_01.active_power
+      solar: kish.solar_roof.inverter_01.ac_power
+
+  - name: solar_share
+    description: Share of the site load covered by solar.
+    unit: "%"
+    data_type: float64
+    formula: if(load > 0, solar / load, 0)
+    inputs:
+      load: kish.energy.calc_kish.site_power
+      solar: kish.solar_roof.inverter_01.ac_power
+
+  - name: metered_power_total
+    description: Every point with role active_power on the campus (building model aggregate).
+    unit: kW
+    data_type: float64
+    missing: skip
+    formula: sum_of("kish_campus", "active_power")
+
+  - name: grid_energy
+    description: Energy imported through the main incomer, integrated from its power.
+    unit: kWh
+    data_type: float64
+    formula: integrate(grid)
+    inputs:
+      grid: kish.substation.meter_01.active_power
+
+  - name: transfer_pump_hours
+    description: Running hours of transfer pump 1, counted by the hub.
+    unit: h
+    data_type: float64
+    formula: runtime(running)
+    inputs:
+      running: kish.pump_station.plc_01.motor_running
+
+  - name: cooling_deviation
+    description: Basin temperature above its setpoint (a temperature difference).
+    unit: K
+    data_type: float64
+    formula: basin - setpoint
+    inputs:
+      basin: kish.utilities.plc_omron_01.basin_temperature
+      setpoint: kish.utilities.plc_omron_01.temperature_setpoint
+
+  - name: ro_specific_energy
+    description: Specific energy of the water treatment (grid power per permeate flow).
+    unit: kWh/m3
+    data_type: float64
+    formula: if(flow > 0[m3/h], grid / flow, 0)
+    inputs:
+      grid: kish.substation.meter_01.active_power
+      flow: kish.water_treatment.plc_logix_01.permeate_flow
+
+  - name: any_pump_running
+    data_type: bool
+    formula: pump or hp_pump
+    inputs:
+      pump: kish.pump_station.plc_01.motor_running
+      hp_pump: kish.water_treatment.plc_logix_01.hp_pump_running

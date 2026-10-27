@@ -24,6 +24,7 @@ Language = Literal["fa", "en"]
 
 class GrantIn(BaseModel):
     role: str = Field(min_length=1, max_length=32)
+    organization: str | None = Field(default=None, pattern=f"^{SEGMENT_PATTERN}$")
     site: str | None = Field(default=None, pattern=f"^{SEGMENT_PATTERN}$")
     area: str | None = Field(default=None, pattern=f"^{SEGMENT_PATTERN}$")
 
@@ -50,6 +51,7 @@ class PasswordReset(BaseModel):
 class GrantOut(BaseModel):
     user_role_id: int
     role: str
+    organization: str | None = None
     site: str | None
     area: str | None
     granted_at: datetime
@@ -71,8 +73,8 @@ class UserOut(BaseModel):
 
 
 def _grant_out(g: RoleGrant) -> GrantOut:
-    return GrantOut(user_role_id=g.user_role_id, role=g.role_id, site=g.site, area=g.area,
-                    granted_at=g.granted_at)
+    return GrantOut(user_role_id=g.user_role_id, role=g.role_id, organization=g.org_id,
+                    site=g.site, area=g.area, granted_at=g.granted_at)
 
 
 async def _user_out(svc: ServicesDep, user: UserRecord) -> UserOut:
@@ -100,6 +102,14 @@ async def _check_grant(svc: ServicesDep, grant: GrantIn) -> None:
         raise Invalid(f"unknown role {grant.role}", code="unknown_role")
     if grant.area is not None and grant.site is None:
         raise Invalid("an area scope needs a site", code="invalid_scope")
+    if grant.organization is not None:
+        if grant.site is not None:
+            raise Invalid("grant for an organization or for a site, not both",
+                          code="invalid_scope")
+        known = {o.id for o in svc.hub.report.building.organizations}
+        if grant.organization not in known:
+            raise Invalid(f"unknown organization {grant.organization} (config/building.yaml)",
+                          code="unknown_organization")
 
 
 async def _guard_last_admin(svc: ServicesDep, *, disabling: int | None = None,
@@ -111,7 +121,7 @@ async def _guard_last_admin(svc: ServicesDep, *, disabling: int | None = None,
         for g in await svc.store.grants(user.user_id):
             if removing is not None and g.user_role_id == removing.user_role_id:
                 continue
-            if g.role_id == "admin" and g.site is None:
+            if g.role_id == "admin" and g.site is None and g.org_id is None:
                 return
     raise Conflict("this would remove the last administrator", code="last_admin")
 
@@ -139,7 +149,8 @@ async def create_user(body: UserIn, request: Request, svc: ServicesDep, p: Admin
     except pg_errors.UniqueViolation as exc:
         raise Conflict("username already exists", code="username_taken") from exc
     for grant in body.roles:
-        await svc.store.grant_role(user.user_id, grant.role, grant.site, grant.area, p.user_id)
+        await svc.store.grant_role(user.user_id, grant.role, grant.site, grant.area, p.user_id,
+                                   grant.organization)
     await svc.store.add_auth_audit("user_created", user.username, user_id=user.user_id,
                                    actor_id=p.user_id, client_addr=client_addr(request),
                                    detail={"roles": [g.model_dump() for g in body.roles]})
@@ -203,7 +214,8 @@ async def grant_role(user_id: int, body: GrantIn, request: Request, svc: Service
     _local_only(user, "roles (directory groups, config/ldap.yaml)")
     await _check_grant(svc, body)
     try:
-        grant = await svc.store.grant_role(user_id, body.role, body.site, body.area, p.user_id)
+        grant = await svc.store.grant_role(user_id, body.role, body.site, body.area, p.user_id,
+                                           body.organization)
     except pg_errors.UniqueViolation as exc:
         raise Conflict("the user already has this role for this scope", code="duplicate") from exc
     await svc.store.add_auth_audit("role_granted", user.username, user_id=user_id,

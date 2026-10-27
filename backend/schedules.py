@@ -158,7 +158,8 @@ class Scheduler:
         if user is None or not user.is_active:
             return None
         return Principal(user=user, session_id=None, grants=tuple(await store.grants(owner_id)),
-                         role_permissions=await store.role_permissions())
+                         role_permissions=await store.role_permissions(),
+                         site_orgs=self.services.auth.site_orgs())
 
     async def run(self, schedule: dict[str, Any], trigger: str) -> dict[str, Any]:
         store = self.services.store

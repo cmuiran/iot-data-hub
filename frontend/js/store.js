@@ -33,6 +33,11 @@ export function canTag(permission, path) {
   return can(permission, site, area);
 }
 
+/** Writes: tag.write allows all; control.setpoint / control.command only their write class. */
+export function writePermission(tag) { return tag?.write_class === 'setpoint' ? 'control.setpoint' : 'control.command'; }
+export function canWriteTag(tag) { return canTag('tag.write', tag.tag) || canTag(writePermission(tag), tag.tag); }
+export function canWriteAny() { return ['tag.write', 'control.setpoint', 'control.command'].some((p) => can(p)); }
+
 // --- catalogue -----------------------------------------------------------------------------
 
 export async function loadCatalogue() {

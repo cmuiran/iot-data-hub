@@ -286,5 +286,25 @@
         "type": "float"
       }
     ]
+  },
+  "calc": {
+    "device_id": "calc_new",
+    "name": "New calculations",
+    "site": "kish",
+    "area": "energy",
+    "protocol": "calc",
+    "enabled": false,
+    "tags": [
+      {
+        "name": "total_power",
+        "unit": "kW",
+        "data_type": "float64",
+        "formula": "p1 + p2",
+        "inputs": {
+          "p1": "kish.substation.meter_01.active_power",
+          "p2": "kish.solar_roof.inverter_01.ac_power"
+        }
+      }
+    ]
   }
 }

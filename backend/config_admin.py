@@ -8,12 +8,20 @@ change leaves a ``config_changed`` row in auth_audit with the user, the action a
 
 Files written by the API are regenerated from the models, so hand-written comments in those
 files are not kept. In a two-node (HA) setup both nodes must read the same config directory.
+
+Rollback: before every change the YAML files of the configuration are copied to
+``config/.history/<time>-<action>/`` (the newest ``HISTORY_KEEP`` are kept). ``restore`` puts
+such a copy back, validated and applied like any other change (``config_restored`` in the audit).
+
+Calculated devices also need ``calc.publish``; the building model needs ``model.edit``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -23,10 +31,11 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from backend.errors import Conflict, Invalid, NotFound
+from backend.errors import Conflict, Forbidden, Invalid, NotFound
 from backend.rbac import Principal
 from hub.config_loader import (
     ALARMS_FILE,
+    BUILDING_FILE,
     CONTROL_FILE,
     DEVICES_DIR,
     ConfigReport,
@@ -34,9 +43,28 @@ from hub.config_loader import (
     load_config,
 )
 from hub.drivers.base import utcnow
-from hub.models import DEVICE_ADAPTER, AlarmRule, AlarmsFile, ControlFile, ControlPolicy
+from hub.models import (
+    DEVICE_ADAPTER,
+    AlarmRule,
+    AlarmsFile,
+    BuildingFile,
+    CalcDevice,
+    ControlFile,
+    ControlPolicy,
+)
 
 Mutation = Callable[[Path], None]
+HISTORY_DIR = ".history"
+HISTORY_KEEP = 100
+_SNAPSHOT_RE = re.compile(r"\d{8}-\d{6}-\d{6}-[a-z_]{1,40}")
+_SKIP = shutil.ignore_patterns(".trash", ".history", "*.tmp")
+
+
+def _config_files(root: Path) -> list[Path]:
+    """The YAML files of a configuration, relative to ``root`` (no history, no trash)."""
+    return sorted(p.relative_to(root) for p in [*root.glob("*.yaml"), *root.glob("*.yml"),
+                                                *(root / DEVICES_DIR).glob("*.yaml"),
+                                                *(root / DEVICES_DIR).glob("*.yml")])
 
 
 def _dump(model: Any) -> str:
@@ -81,8 +109,7 @@ class ConfigAdmin:
         """Apply ``mutate`` to a scratch copy and validate the result."""
         with tempfile.TemporaryDirectory(prefix="hub-config-") as tmp:
             scratch = Path(tmp) / "config"
-            shutil.copytree(self.config_dir, scratch,
-                            ignore=shutil.ignore_patterns(".trash", "*.tmp"))
+            shutil.copytree(self.config_dir, scratch, ignore=_SKIP)
             mutate(scratch)
             return load_config(scratch)
 
@@ -97,17 +124,114 @@ class ConfigAdmin:
                 raise Invalid("the change would make the configuration invalid",
                               code="config_invalid", extra={"issues": new_errors or
                                                             _issues(trial)})
+            snapshot = await asyncio.to_thread(self._snapshot, principal, action, target)
             await asyncio.to_thread(mutate, self.config_dir)
             report = load_config(self.config_dir)
-            changes = await self.services.reload(report)
+            try:
+                changes = await self.services.reload(report)
+            except Exception:
+                # applying failed: put the files back so disk and running hub agree again
+                await asyncio.to_thread(self._put_back, snapshot)
+                await self.services.reload(load_config(self.config_dir))
+                raise
             await self.services.store.add_auth_audit(
                 "config_changed", principal.username, user_id=principal.user_id,
                 detail={"action": action, "target": target, **(detail or {}),
+                        "snapshot": snapshot,
                         "applied": {k: v for k, v in changes.items() if k != "unchanged"}})
             warnings = [i.model_dump(mode="json") for i in report.issues
                         if i.severity is Severity.WARNING]
             return {"action": action, "target": target, "changes": changes,
                     "warnings": warnings}
+
+    # --- history and restore ----------------------------------------------------------------
+
+    def _snapshot(self, principal: Principal, action: str, target: str) -> str:
+        now = utcnow()
+        name = f"{now:%Y%m%d-%H%M%S-%f}-{re.sub('[^a-z_]', '_', action)[:40]}"
+        dest = self.config_dir / HISTORY_DIR / name
+        for rel in _config_files(self.config_dir):
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.config_dir / rel, dest / rel)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "meta.json").write_text(json.dumps({
+            "ts": now.isoformat(), "action": action, "target": target,
+            "user": principal.username}), encoding="utf-8")
+        for old in sorted((self.config_dir / HISTORY_DIR).iterdir())[:-HISTORY_KEEP]:
+            shutil.rmtree(old, ignore_errors=True)
+        return name
+
+    def _put_back(self, snapshot: str) -> None:
+        """Make the YAML files exactly those of ``snapshot``."""
+        source = self.config_dir / HISTORY_DIR / snapshot
+        wanted = _config_files(source)
+        for rel in _config_files(self.config_dir):
+            if rel not in wanted:
+                (self.config_dir / rel).unlink()
+        for rel in wanted:
+            (self.config_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / rel, self.config_dir / rel)
+
+    def history(self) -> list[dict[str, Any]]:
+        """Snapshots, newest first: the configuration as it was before each change."""
+        root = self.config_dir / HISTORY_DIR
+        out = []
+        for d in sorted(root.iterdir(), reverse=True) if root.is_dir() else []:
+            meta_file = d / "meta.json"
+            if not _SNAPSHOT_RE.fullmatch(d.name) or not meta_file.is_file():
+                continue
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            out.append({"id": d.name, **meta,
+                        "files": [str(p).replace("\\", "/") for p in _config_files(d)]})
+        return out
+
+    async def restore(self, principal: Principal, snapshot_id: str) -> dict[str, Any]:
+        if not _SNAPSHOT_RE.fullmatch(snapshot_id):
+            raise NotFound("no such snapshot")
+        source = self.config_dir / HISTORY_DIR / snapshot_id
+        if not (source / "meta.json").is_file():
+            raise NotFound("no such snapshot")
+        wanted = _config_files(source)
+        if any(isinstance(d.device, CalcDevice) for d in load_config(source).devices) or any(
+                isinstance(d, CalcDevice) for d in self.services.hub.devices.values()):
+            self.require_calc(principal)
+
+        def mutate(root: Path) -> None:
+            for rel in _config_files(root):
+                if rel not in wanted:
+                    (root / rel).unlink()
+            for rel in wanted:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / rel, root / rel)
+
+        return await self._apply(principal, "config_restored", snapshot_id, mutate)
+
+    # --- permissions beyond config.edit ----------------------------------------------------------
+
+    @staticmethod
+    def require_calc(principal: Principal) -> None:
+        if not principal.can("calc.publish"):
+            raise Forbidden("calculated tags need the calc.publish permission")
+
+    def _check_calc(self, principal: Principal, device_id: str, new: Any = None) -> None:
+        old = self.services.hub.devices.get(device_id)
+        if isinstance(new, CalcDevice) or isinstance(old, CalcDevice):
+            self.require_calc(principal)
+
+    # --- building model -------------------------------------------------------------------------
+
+    def building_data(self) -> dict[str, Any]:
+        return self.services.report.building.model_dump(mode="json", exclude_none=True)
+
+    async def put_building(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
+        try:
+            building = BuildingFile.model_validate(data)
+        except ValidationError as exc:
+            raise Invalid("building model is not valid", code="building_invalid",
+                          extra={"errors": _model_errors(exc)}) from exc
+        return await self._apply(principal, "building_updated", BUILDING_FILE,
+                                 lambda root: _write_atomic(root / BUILDING_FILE,
+                                                            _dump(building)))
 
     async def reload_from_disk(self, principal: Principal) -> dict[str, Any]:
         async with self._lock:
@@ -158,6 +282,7 @@ class ConfigAdmin:
 
     async def create_device(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         device = self._parse(data)
+        self._check_calc(principal, device.device_id, device)
         if self._device_file(self.config_dir, device.device_id).exists():
             raise Conflict(f"device {device.device_id} already exists", code="device_exists")
         return await self._apply(principal, "device_created", device.device_id,
@@ -167,6 +292,7 @@ class ConfigAdmin:
     async def replace_device(self, principal: Principal, device_id: str,
                              data: dict[str, Any]) -> dict[str, Any]:
         device = self._parse(data)
+        self._check_calc(principal, device_id, device)
         if device.device_id != device_id:
             raise Invalid("device_id in the body must match the URL", code="id_mismatch")
         if not self._device_file(self.config_dir, device_id).exists():
@@ -181,6 +307,7 @@ class ConfigAdmin:
         return await self.replace_device(principal, device_id, current | {"enabled": enabled})
 
     async def delete_device(self, principal: Principal, device_id: str) -> dict[str, Any]:
+        self._check_calc(principal, device_id)
         if not self._device_file(self.config_dir, device_id).exists():
             raise NotFound("no such device file")
         stamp = utcnow().strftime("%Y%m%d-%H%M%S")

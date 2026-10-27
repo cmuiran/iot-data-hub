@@ -677,3 +677,48 @@ Status per target: `GET /api/system/outputs` (`type: kafka`, `connected`, `queue
 `published`, `dropped`, `reconnects`, `last_error`). The producer is aiokafka; the tests use a
 fake producer, so check the first connection to the real cluster during commissioning.
 
+
+## 30. Building model and calculated tags (BMS phase 1)
+
+See `docs/building-model.md` (config/building.yaml, /api/model, maintenance records) and
+`docs/calculated-tags.md` (protocol `calc`, formula language, units, versions, /api/calc).
+
+## 31. Data quality: reason and receive time (BMS phase 1)
+
+A sample keeps its value apart from how good it is and why:
+
+| Field | Meaning |
+|---|---|
+| `ts` | source time when the device provides one (OPC UA, IEC 104, MQTT/HTTP with a timestamp path), else the hub's time |
+| `received_at` | when the hub received it (set by the hub) |
+| `quality` | good / uncertain / bad |
+| `reason` | why it is not good: `comm_failure`, `out_of_range`, `stale`, `config_error`, `device_reported`, `math_error`, `input_bad`, `manual` |
+
+Stored in `samples.reason` and `tag_latest.reason` / `tag_latest.received_at`; returned by
+`/api/tags`, `/api/tags/{tag}/latest` and `/api/model/equipment/{id}`. Collection problems over
+time (offline / read errors per device) are kept in `collection_errors` for 90 days:
+`GET /api/devices/{device_id}/errors`.
+
+## 32. Permissions: setpoints vs commands, organizations (BMS phase 1)
+
+* Tags with `access: read_write` may set `write_class: setpoint` or `command` (unset = command).
+  `tag.write` allows every write as before; `control.setpoint` / `control.command` allow only
+  their class. New role `setpoint_operator`: view, acknowledge alarms, change setpoints, no
+  start/stop. The control-safety layer checks the right permission for the tag.
+* `model.edit` (building model) and `calc.publish` (calculated tags, on top of `config.edit`) are
+  global; `maintenance.write` is scoped like `tag.write`.
+* A role can be granted for an **organization** (`organization` in `POST /api/users` /
+  `POST /api/users/{id}/roles`): it covers every site of that organization in
+  config/building.yaml, including sites added later.
+
+## 33. Configuration history and rollback (BMS phase 1)
+
+* Before every change through the API, the configuration's YAML files are copied to
+  `config/.history/<time>-<action>/` with who/what/when (`meta.json`); the newest 100 are kept.
+  `GET /api/config/history` lists them, `POST /api/config/history/{id}/restore` puts one back
+  (validated, applied live, audited as `config_restored`; the state before the restore is itself
+  a snapshot). If applying a change fails, the files are put back automatically.
+* Database: migrations from 0008 on have a rollback script in `db/migrations/down/`:
+  `python -m hub.storage.migrate --rollback 0008_building_model` (only the most recent migration,
+  one transaction; refused while calculated devices, organization grants or the
+  setpoint_operator role are in use). Earlier migrations: restore the pre-upgrade backup.

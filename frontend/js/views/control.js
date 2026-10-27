@@ -6,7 +6,7 @@ import {
   h, mount, table, button, valueNode, tagLabel, notice, errorText, toast, badge, modal, field,
   qualityBadge,
 } from '../ui.js';
-import { store, bus, canTag, can, deviceOfTag } from '../store.js';
+import { store, bus, canTag, can, deviceOfTag, canWriteTag, canWriteAny } from '../store.js';
 import { openWriteDialog, resultBox } from '../control-dialog.js';
 
 export async function render(page, { setTitle }) {
@@ -17,7 +17,7 @@ export async function render(page, { setTitle }) {
   const valueCells = new Map();
   const users = new Map();
 
-  const writable = () => [...store.tags.values()].filter((tag) => tag.access === 'read_write' && canTag('tag.write', tag.tag));
+  const writable = () => [...store.tags.values()].filter((tag) => tag.access === 'read_write' && canWriteTag(tag));
 
   function drawTags() {
     valueCells.clear();
@@ -112,8 +112,8 @@ export async function render(page, { setTitle }) {
   mount(page,
     h('div', { class: 'page-head' }, h('div', null, h('h1', null, t('control.title')), h('div', { class: 'sub' }, t('control.subtitle')))),
     store.info?.control_enabled ? null : notice(t('control.disabled_hub_banner'), 'warn'),
-    can('tag.write') ? tagsBox : null, pendingBox, logBox);
-  if (can('tag.write')) drawTags();
+    canWriteAny() ? tagsBox : null, pendingBox, logBox);
+  if (canWriteAny()) drawTags();
   loadPending();
   loadLog();
 

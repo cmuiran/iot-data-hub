@@ -11,15 +11,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from psycopg import errors as pg_errors
 
-from backend.deps import ServicesDep, client_addr, require
+from backend.deps import ServicesDep, client_addr, require_writer
 from backend.errors import Conflict, Forbidden, Invalid, NotFound
-from backend.rbac import Principal, split_path
+from backend.rbac import Principal, split_path, write_permission
 from backend.schedules import ScheduleIn, WaitStep, WriteStep
 from hub.drivers.base import utcnow
 from hub.models import Access
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
-Writer = Annotated[Principal, Depends(require("tag.write"))]
+Writer = Annotated[Principal, Depends(require_writer())]
 
 
 def _check_steps(svc: ServicesDep, p: Principal, body: ScheduleIn) -> None:
@@ -30,8 +30,8 @@ def _check_steps(svc: ServicesDep, p: Principal, body: ScheduleIn) -> None:
             if found is None:
                 raise Invalid(f"step {i}: unknown tag {tag}", code="schedule_invalid")
             site, area, _, _ = split_path(tag)
-            if not p.can("tag.write", site, area):
-                raise Forbidden(f"step {i}: no tag.write for {tag}")
+            if not p.can_write(found[1].write_class, site, area):
+                raise Forbidden(f"step {i}: no {write_permission(found[1].write_class)} for {tag}")
             if found[1].access is not Access.READ_WRITE:
                 raise Invalid(f"step {i}: {tag} is read-only", code="schedule_invalid")
             if svc.control.control.policy_for(tag).confirm:

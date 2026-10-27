@@ -18,8 +18,10 @@ const ROUTES = [
   { path: 'reports', view: () => import('./views/reports.js'), perm: 'data.read' },
   { path: 'dashboards', view: () => import('./views/dashboards.js'), perm: 'data.read' },
   { path: 'dashboards/:id', view: () => import('./views/dashboard.js'), perm: 'data.read' },
-  { path: 'control', view: () => import('./views/control.js'), perm: ['tag.write', 'write.confirm'] },
-  { path: 'schedules', view: () => import('./views/schedules.js'), perm: 'tag.write' },
+  { path: 'building', view: () => import('./views/building.js'), perm: 'data.read' },
+  { path: 'calc', view: () => import('./views/calc.js'), perm: 'data.read' },
+  { path: 'control', view: () => import('./views/control.js'), perm: ['tag.write', 'control.setpoint', 'control.command', 'write.confirm'] },
+  { path: 'schedules', view: () => import('./views/schedules.js'), perm: ['tag.write', 'control.setpoint', 'control.command'] },
   { path: 'users', view: () => import('./views/users.js'), perm: 'user.manage' },
   { path: 'config/devices', view: () => import('./views/config-devices.js'), perm: 'config.edit' },
   { path: 'config/devices/:id', view: () => import('./views/config-device.js'), perm: 'config.edit' },
@@ -32,10 +34,12 @@ const ROUTES = [
 const NAV = [
   { group: 'nav.monitoring', items: [
     { path: 'overview', icon: 'overview', label: 'nav.overview' },
+    { path: 'building', icon: 'building', label: 'nav.building' },
     { path: 'alarms', icon: 'alarm', label: 'nav.alarms', count: true },
     { path: 'trends', icon: 'trend', label: 'nav.trends' },
     { path: 'reports', icon: 'report', label: 'nav.reports' },
     { path: 'dashboards', icon: 'dashboard', label: 'nav.dashboards' },
+    { path: 'calc', icon: 'calc', label: 'nav.calc' },
   ] },
   { group: 'nav.operation', items: [
     { path: 'control', icon: 'control', label: 'nav.control' },

@@ -22,7 +22,8 @@ def _device_examples() -> list[str]:
 
 def test_cheatsheet_has_one_example_per_protocol() -> None:
     protocols = sorted(yaml.safe_load(b)["protocol"] for b in _device_examples())
-    assert protocols == sorted(PROTOCOLS)   # a new protocol needs its example
+    # a new protocol needs its example; calculated devices are made on the Calculated tags page
+    assert protocols == sorted(set(PROTOCOLS) - {"calc"})
 
 
 @pytest.mark.parametrize("block", _device_examples(), ids=lambda b: b.split("\n")[0])

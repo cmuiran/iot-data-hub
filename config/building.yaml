@@ -1,0 +1,125 @@
+# Building information model (schema: BuildingFile in hub/models.py; docs/building-model.md).
+# Organization -> campus -> building -> floor -> zone -> room; system -> equipment -> point.
+# Points refer to existing tag paths; tag names never change because of this file.
+# haystack / brick_class are optional, kept for a later Project Haystack / Brick export.
+
+organizations:
+  - id: gate_kish
+    name: GATE Kish
+    sites: [kish]
+
+locations:
+  - {id: kish_campus, kind: campus, name: Kish site, site: kish}
+
+  - {id: admin_building, kind: building, name: Administration building, parent: kish_campus,
+     area_m2: 2400, brick_class: Building, haystack: [site]}
+  - {id: admin_ground, kind: floor, name: Ground floor, parent: admin_building, level: 0}
+  - {id: admin_ground_it, kind: zone, name: IT zone, parent: admin_ground}
+  - {id: server_room, kind: room, name: Server room, parent: admin_ground_it,
+     brick_class: Server_Room}
+  - {id: admin_roof, kind: floor, name: Roof, parent: admin_building, level: 3}
+
+  - {id: utility_building, kind: building, name: Utility building, parent: kish_campus}
+  - {id: utility_ground, kind: floor, name: Ground floor, parent: utility_building, level: 0}
+  - {id: substation_room, kind: room, name: Main substation, parent: utility_ground}
+  - {id: pump_room, kind: room, name: Pump room, parent: utility_ground}
+  - {id: cooling_yard, kind: room, name: Cooling tower yard, parent: utility_ground}
+
+  - {id: warehouse, kind: building, name: Warehouse, parent: kish_campus}
+  - {id: warehouse_floor, kind: floor, name: Storage floor, parent: warehouse, level: 0}
+
+systems:
+  - {id: admin_electrical, kind: electrical, name: Electrical (administration), building: admin_building}
+  - {id: admin_it_power, kind: electrical, name: IT power, building: admin_building}
+  - {id: utility_electrical, kind: electrical, name: Electrical (utility), building: utility_building}
+  - {id: utility_water, kind: water, name: Water, building: utility_building}
+  - {id: utility_hvac, kind: hvac, name: Cooling, building: utility_building}
+  - {id: warehouse_monitoring, kind: other, name: Environment monitoring, building: warehouse}
+
+equipment:
+  - id: main_incomer_meter
+    name: Main incomer power meter
+    type: meter
+    location: substation_room
+    system: utility_electrical
+    device: meter_01
+    status: in_service
+    haystack: [elec, meter]
+    brick_class: Electrical_Energy_Meter
+    points:
+      - {role: active_power, tag: kish.substation.meter_01.active_power,
+         haystack: [elec, power, sensor], brick_class: Active_Power_Sensor}
+      - {role: energy, tag: kish.substation.meter_01.energy_total,
+         haystack: [elec, energy, sensor], brick_class: Energy_Sensor}
+      - {role: voltage, tag: kish.substation.meter_01.voltage_l1}
+      - {role: breaker_closed, tag: kish.substation.meter_01.breaker_closed}
+      - {role: demand_limit, tag: kish.substation.meter_01.demand_limit}
+
+  - id: substation_rtu
+    name: Substation RTU (incomer feeder)
+    type: rtu
+    location: substation_room
+    system: utility_electrical
+    device: rtu_substation_01
+    points:
+      - {role: incomer_power, tag: kish.substation.rtu_substation_01.incomer_power}
+      - {role: busbar_voltage, tag: kish.substation.rtu_substation_01.busbar_voltage}
+
+  - id: solar_inverter_01
+    name: Rooftop solar inverter
+    type: pv_inverter
+    location: admin_roof
+    system: admin_electrical
+    device: inverter_01
+    manufacturer: (to be filled during commissioning)
+    brick_class: PV_Panel
+    points:
+      - {role: active_power, tag: kish.solar_roof.inverter_01.ac_power,
+         brick_class: Active_Power_Sensor}
+      - {role: energy, tag: kish.solar_roof.inverter_01.energy_total}
+
+  - id: ups_01
+    name: Server room UPS
+    type: ups
+    location: server_room
+    system: admin_it_power
+    device: ups_01
+    points:
+      - {role: battery_charge, tag: kish.server_room.ups_01.battery_charge}
+      - {role: load, tag: kish.server_room.ups_01.output_load}
+
+  - id: transfer_pump_01
+    name: Transfer pump 1
+    type: pump
+    location: pump_room
+    system: utility_water
+    device: plc_01
+    haystack: [pump, equip]
+    brick_class: Pump
+    points:
+      - {role: speed, tag: kish.pump_station.plc_01.motor_speed}
+      - {role: running, tag: kish.pump_station.plc_01.motor_running}
+      - {role: discharge_pressure, tag: kish.pump_station.plc_01.discharge_pressure}
+
+  - id: cooling_tower_01
+    name: Cooling tower 1
+    type: cooling_tower
+    location: cooling_yard
+    system: utility_hvac
+    device: plc_omron_01
+    brick_class: Cooling_Tower
+    points:
+      - {role: basin_temp, tag: kish.utilities.plc_omron_01.basin_temperature}
+      - {role: basin_temp_setpoint, tag: kish.utilities.plc_omron_01.temperature_setpoint}
+      - {role: running, tag: kish.utilities.plc_omron_01.fan_running}
+
+  - id: warehouse_env_01
+    name: Warehouse environment sensor
+    type: sensor
+    location: warehouse_floor
+    system: warehouse_monitoring
+    device: env_sensor_01
+    points:
+      - {role: zone_air_temp, tag: kish.warehouse.env_sensor_01.temperature,
+         haystack: [zone, air, temp, sensor], brick_class: Zone_Air_Temperature_Sensor}
+      - {role: zone_humidity, tag: kish.warehouse.env_sensor_01.humidity}

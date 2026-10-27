@@ -31,6 +31,7 @@ from hub.models import (
     MqttDevice,
     OpcUaDevice,
     Quality,
+    QualityReason,
     S7Device,
     Sample,
     SnmpDevice,
@@ -196,15 +197,20 @@ class Driver(ABC, Generic[D]):
 
     def make_sample(
         self, tag: TagBase, raw: Value | None, quality: Quality | None = None,
-        timestamp: datetime | None = None,
+        timestamp: datetime | None = None, reason: QualityReason | None = None,
     ) -> Sample:
+        """``reason`` defaults to: no value -> comm_failure; a quality given by the device ->
+        device_reported; outside min/max -> out_of_range."""
         ts = timestamp or self._clock()
         if raw is None:
             return Sample(tag=self.device.tag_path(tag.name), value=None, timestamp=ts,
-                          quality=Quality.BAD)
+                          quality=Quality.BAD, reason=reason or QualityReason.COMM_FAILURE)
         value = to_engineering(tag, raw)
         q = quality or range_quality(tag, value)
-        return Sample(tag=self.device.tag_path(tag.name), value=value, timestamp=ts, quality=q)
+        if q is not Quality.GOOD and reason is None:
+            reason = QualityReason.DEVICE_REPORTED if quality else QualityReason.OUT_OF_RANGE
+        return Sample(tag=self.device.tag_path(tag.name), value=value, timestamp=ts, quality=q,
+                      reason=reason)
 
     async def emit(self, samples: list[Sample]) -> None:
         if not samples:

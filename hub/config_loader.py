@@ -31,9 +31,11 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from hub.building import BuildingModel
 from hub.models import (
     BIT_REGISTER_TYPES,
     DEVICE_ADAPTER,
+    LOCATION_PARENTS,
     MODBUS_WIDTH,
     NUMERIC_TYPES,
     PROTOCOLS,
@@ -41,9 +43,12 @@ from hub.models import (
     AlarmsFile,
     Broker,
     BrokersFile,
+    BuildingFile,
+    CalcDevice,
     ControlFile,
     DataType,
     EnipDevice,
+    EquipmentStatus,
     FinsDevice,
     HttpBasicAuth,
     HttpBearerAuth,
@@ -65,6 +70,7 @@ from hub.models import (
     SecurityPolicy,
     SnmpDevice,
     SnmpV2c,
+    SystemKind,
     TagBase,
     UsernameAuth,
     topics_overlap,
@@ -80,6 +86,7 @@ NOTIFICATIONS_FILE = "notifications.yaml"
 NORTHBOUND_FILE = "northbound.yaml"
 MODBUS_SERVER_FILE = "modbus_server.yaml"
 LDAP_FILE = "ldap.yaml"
+BUILDING_FILE = "building.yaml"
 
 AnyDevice = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device | HttpDevice
              | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
@@ -117,6 +124,10 @@ class ConfigReport:
     modbus_server: ModbusServerFile = field(
         default_factory=lambda: ModbusServerFile(enabled=False))
     ldap: LdapFile | None = None                   # directory sign-in (config/ldap.yaml)
+    building: BuildingFile = field(default_factory=BuildingFile)  # config/building.yaml
+    # calculated tags that compiled, by tag path, and their evaluation order (hub.calc)
+    calcs: dict[str, Any] = field(default_factory=dict)
+    calc_order: list[str] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     # Every file that was read, mapped to its device_id (None if unknown or not a device file).
     sources: dict[str, str | None] = field(default_factory=dict)
@@ -132,6 +143,13 @@ class ConfigReport:
             for tag in loaded.device.tags:
                 out[loaded.device.tag_path(tag.name)] = (loaded.device, tag)
         return out
+
+    @property
+    def building_model(self) -> BuildingModel:
+        cached = self.__dict__.get("_building_model")
+        if cached is None or cached.file is not self.building:
+            cached = self.__dict__["_building_model"] = BuildingModel(self.building)
+        return cached
 
     def issues_for(self, source: str) -> list[Issue]:
         return [i for i in self.issues if i.source == source]
@@ -247,6 +265,9 @@ def load_config(config_dir: Path | str, env: Mapping[str, str] | None = None) ->
     _load_optional(report, NORTHBOUND_FILE, NorthboundFile, "northbound")
     _load_optional(report, MODBUS_SERVER_FILE, ModbusServerFile, "modbus_server")
     _load_optional(report, LDAP_FILE, LdapFile, "ldap")
+    _load_optional(report, BUILDING_FILE, BuildingFile, "building")
+    _check_building(report)
+    _check_calcs(report)
     _check_alarms(report)
     _check_control(report)
     _check_notifications(report, env)
@@ -663,6 +684,8 @@ def device_connections(devices: Iterable[AnyDevice]) -> int:
     for device in devices:
         if not device.enabled:
             continue
+        if isinstance(device, CalcDevice):         # computed by the hub, no connection
+            continue
         if isinstance(device, ModbusDevice):
             c = device.connection
             modbus.add((c.host.lower(), c.port, c.framer))
@@ -909,3 +932,118 @@ def _check_notifications(report: ConfigReport, env: Mapping[str, str]) -> None:
                 for attr in ("username_env", "password_env", "bot_token_env", "api_key_env",
                              "secret_env")]
         _warn_unset_env_vars(report, NOTIFICATIONS_FILE, refs, env)
+
+
+def _check_building(report: ConfigReport) -> None:
+    b = report.building
+    src = BUILDING_FILE
+    tags = report.tags_by_path()
+    device_ids = {d.device.device_id for d in report.devices}
+    sites = {d.device.site for d in report.devices}
+
+    def unique(items: list[Any], what: str, key: str) -> None:
+        seen: set[str] = set()
+        for i, item in enumerate(items):
+            if item.id in seen:
+                report.add(Severity.ERROR, src, f"duplicate {what} id {item.id!r}",
+                           f"{key}[{i}]")
+            seen.add(item.id)
+
+    unique(b.organizations, "organization", "organizations")
+    unique(b.locations, "location", "locations")
+    unique(b.systems, "system", "systems")
+    unique(b.equipment, "equipment", "equipment")
+
+    site_owner: dict[str, str] = {}
+    for i, org in enumerate(b.organizations):
+        for site in org.sites:
+            if site in site_owner and site_owner[site] != org.id:
+                report.add(Severity.ERROR, src, f"site {site!r} belongs to two organizations "
+                           f"({site_owner[site]}, {org.id})", f"organizations[{i}].sites")
+            site_owner.setdefault(site, org.id)
+    if b.organizations:
+        for site in sorted(sites - set(site_owner)):
+            report.add(Severity.WARNING, src, f"site {site!r} belongs to no organization: only "
+                       "users with an unrestricted role see it", "organizations")
+
+    locations = {loc.id: loc for loc in b.locations}
+    for i, loc in enumerate(b.locations):
+        where = f"locations[{i}] ({loc.id})"
+        parent = locations.get(loc.parent) if loc.parent else None
+        if loc.parent is not None and parent is None:
+            report.add(Severity.ERROR, src, f"unknown parent {loc.parent!r}", f"{where}.parent")
+            continue
+        allowed = LOCATION_PARENTS[loc.kind]
+        if (parent.kind if parent else None) not in allowed:
+            names = " or ".join(sorted(str(k) for k in allowed if k)) or "nothing (top level)"
+            report.add(Severity.ERROR, src, f"a {loc.kind} goes under {names}, not under "
+                       f"{parent.kind if parent else 'the top level'}", f"{where}.parent")
+        if loc.site is not None and b.organizations and loc.site not in site_owner:
+            report.add(Severity.ERROR, src, f"site {loc.site!r} is in no organization",
+                       f"{where}.site")
+    # the parent-kind rule makes kinds strictly descend, so the tree cannot contain a cycle
+
+    model = report.building_model
+    for i, system in enumerate(b.systems):
+        target = locations.get(system.building)
+        if target is None or target.kind != "building":
+            report.add(Severity.ERROR, src, f"{system.building!r} is not a building",
+                       f"systems[{i}] ({system.id}).building")
+
+    owner: dict[str, str] = {}
+    systems = {s.id: s for s in b.systems}
+    for i, eq in enumerate(b.equipment):
+        where = f"equipment[{i}] ({eq.id})"
+        if eq.location not in locations:
+            report.add(Severity.ERROR, src, f"unknown location {eq.location!r}",
+                       f"{where}.location")
+        elif locations[eq.location].kind == "campus":
+            report.add(Severity.ERROR, src, "equipment is placed in a building, floor, zone or "
+                       "room, not directly on a campus", f"{where}.location")
+        system = systems.get(eq.system) if eq.system else None
+        if eq.system is not None and system is None:
+            report.add(Severity.ERROR, src, f"unknown system {eq.system!r}", f"{where}.system")
+        elif system is not None and eq.location in locations and \
+                model.building_of(eq.location) != system.building:
+            report.add(Severity.ERROR, src, f"system {system.id} belongs to building "
+                       f"{system.building}, but the equipment is in "
+                       f"{model.building_of(eq.location)}", f"{where}.location")
+        if eq.device is not None and eq.device not in device_ids:
+            report.add(Severity.WARNING, src, f"unknown device {eq.device!r}", f"{where}.device")
+        site = model.site_of(eq.location) if eq.location in locations else None
+        for j, point in enumerate(eq.points):
+            loc = f"{where}.points[{j}] ({point.role})"
+            found = tags.get(point.tag)
+            if found is None:
+                report.add(Severity.ERROR, src, f"unknown tag {point.tag}", loc)
+                continue
+            if point.tag in owner:
+                report.add(Severity.ERROR, src, f"{point.tag} is already a point of "
+                           f"{owner[point.tag]}", loc)
+            owner.setdefault(point.tag, eq.id)
+            if site is not None and found[0].site != site:
+                report.add(Severity.WARNING, src, f"{point.tag} is in site {found[0].site}, but "
+                           f"the equipment is on a campus of site {site}", loc)
+            if system is not None and system.kind is SystemKind.FIRE and \
+                    found[1].access is Access.READ_WRITE:
+                report.add(Severity.ERROR, src, "fire systems are monitoring only: "
+                           f"{point.tag} must not be read_write", loc)
+        if eq.status is EquipmentStatus.RETIRED and eq.points:
+            report.add(Severity.WARNING, src, "retired equipment still lists points (they are "
+                       "left out of building totals)", where)
+
+
+def _check_calcs(report: ConfigReport) -> None:
+    from hub.calc.engine import compile_calcs
+
+    calc_devices = [d for d in report.devices if isinstance(d.device, CalcDevice)]
+    if not calc_devices:
+        return
+    sources = {d.device.device_id: d.source for d in calc_devices}
+    catalogue = {path: tag for path, (_d, tag) in report.tags_by_path().items()}
+    defs, order, issues = compile_calcs([d.device for d in calc_devices], catalogue,
+                                        report.building_model)
+    for issue in issues:
+        report.add(Severity.ERROR if issue.error else Severity.WARNING,
+                   sources[issue.source], issue.message, issue.location)
+    report.calcs, report.calc_order = defs, order

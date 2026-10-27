@@ -34,6 +34,19 @@ async def principal(request: Request, svc: ServicesDep) -> Principal:
 PrincipalDep = Annotated[Principal, Depends(principal)]
 
 
+def require_writer() -> Callable[..., Coroutine[Any, Any, Principal]]:
+    """Any write permission (tag.write, control.setpoint or control.command) somewhere; the
+    control-safety layer checks the right one for the tag."""
+    any_write = require("self")
+
+    async def _check(p: Principal = Depends(any_write)) -> Principal:  # noqa: B008
+        if not p.can_write_anything():
+            raise Forbidden("missing permission tag.write / control.setpoint / control.command")
+        return p
+
+    return _check
+
+
 def require(permission: str) -> Callable[..., Coroutine[Any, Any, Principal]]:
     """Global permission, or 'anywhere at all' for scoped ones (finer checks in the route)."""
 

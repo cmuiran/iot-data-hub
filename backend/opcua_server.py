@@ -297,7 +297,8 @@ class HubOpcUaServer:
             return ua.StatusCode(ua.StatusCodes.BadUserAccessDenied)
         principal = Principal(user=account, session_id=None,
                               grants=tuple(await store.grants(account.user_id)),
-                              role_permissions=await store.role_permissions())
+                              role_permissions=await store.role_permissions(),
+                              site_orgs=self.services.auth.site_orgs())
         value = dv.Value.Value if dv.Value is not None else None
         if isinstance(value, float) and value.is_integer() and self.services.hub.tags[path][
                 1].data_type not in (DataType.FLOAT32, DataType.FLOAT64):

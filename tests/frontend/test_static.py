@@ -16,7 +16,17 @@ import pytest
 from backend.control import Status
 from backend.settings import BUNDLED_FRONTEND, Settings, _frontend_dir
 from hub.drivers.base import DeviceState
-from hub.models import DEVICE_ADAPTER, PROTOCOLS, AlarmSeverity, CompareOp, Quality
+from hub.models import (
+    DEVICE_ADAPTER,
+    PROTOCOLS,
+    AlarmSeverity,
+    CompareOp,
+    EquipmentStatus,
+    LocationKind,
+    Quality,
+    QualityReason,
+    WriteClass,
+)
 
 FRONTEND = BUNDLED_FRONTEND
 ROOT = FRONTEND.parent
@@ -86,7 +96,12 @@ def test_every_key_used_in_the_code_exists(source: str,
     ("write_status", list(get_args(Status))),
     ("write_result", _sql_list("0001_core.sql", "result           text NOT NULL CHECK")),
     ("auth_event", _sql_list("0004_security.sql", "ADD CONSTRAINT auth_audit_event_check")),
-    ("roles", ["admin", "engineer", "operator", "viewer"]),
+    ("roles", ["admin", "engineer", "operator", "viewer", "setpoint_operator"]),
+    ("quality_reason", [str(r) for r in QualityReason]),
+    ("write_class", [str(w) for w in WriteClass]),
+    ("location_kind", [str(k) for k in LocationKind]),
+    ("equipment_status", [str(s) for s in EquipmentStatus]),
+    ("maintenance_kind", _sql_list("0008_building_model.sql", "kind          text NOT NULL CHECK")),
     ("interlock", ["ok", "blocked", "stale", "unknown"]),
 ])
 def test_enum_values_are_translated(prefix: str, values: list[str],

@@ -29,6 +29,7 @@ from hub.models import (
     OpcUaDevice,
     OpcUaTag,
     Quality,
+    QualityReason,
     SecurityMode,
     SecurityPolicy,
     TagBase,
@@ -213,13 +214,15 @@ class OpcUaDriver(Driver[OpcUaDevice]):
             quality = quality_of(dv.StatusCode)
             raw = dv.Value.Value if dv.Value is not None else None
             if quality is Quality.BAD or raw is None:
-                samples.append(self.make_sample(tag, None, timestamp=timestamp))
+                samples.append(self.make_sample(tag, None, timestamp=timestamp,
+                                                reason=QualityReason.DEVICE_REPORTED))
                 continue
             try:
                 value = coerce(raw, tag.data_type)
             except CodecError as exc:
                 log.warning("%s.%s: %s", self.device.device_id, tag.name, exc)
-                samples.append(self.make_sample(tag, None, timestamp=timestamp))
+                samples.append(self.make_sample(tag, None, timestamp=timestamp,
+                                                reason=QualityReason.CONFIG_ERROR))
                 continue
             samples.append(self.make_sample(
                 tag, value, quality=None if quality is Quality.GOOD else quality,

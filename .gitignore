@@ -72,6 +72,7 @@ logs/
 backups/
 spool/
 config/.trash/
+config/.history/
 scripts/windows/hub-api-service.exe
 scripts/windows/hub-api-service.xml
 

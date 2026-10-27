@@ -22,7 +22,9 @@
   "config_devices": "دستگاه‌ها",
   "config_rules": "قواعد هشدار و کنترل",
   "audit": "لاگ ممیزی",
-  "system": "سیستم"
+  "system": "سیستم",
+  "building": "ساختمان",
+  "calc": "تگ‌های محاسباتی"
  },
  "common": {
   "apply": "اعمال",
@@ -109,13 +111,15 @@
   "fins": "Omron FINS",
   "mc": "Mitsubishi MC (MELSEC)",
   "enip": "EtherNet/IP (Logix)",
-  "iec104": "IEC 60870-5-104"
+  "iec104": "IEC 60870-5-104",
+  "calc": "محاسباتی"
  },
  "roles": {
   "admin": "مدیر سیستم",
   "engineer": "مهندس",
   "operator": "اپراتور",
-  "viewer": "بیننده"
+  "viewer": "بیننده",
+  "setpoint_operator": "اپراتور تنظیم"
  },
  "limits": {
   "hihi": "خیلی زیاد",
@@ -700,7 +704,10 @@
   "enable": "فعال کردن حساب",
   "username_placeholder": "مثلاً op.rahimi",
   "source_ldap": "Active Directory",
-  "ldap_roles_note": "این کاربر با Active Directory وارد می‌شود. نقش‌هایش در هر ورود از گروه‌های او در دایرکتوری (config/ldap.yaml) گرفته می‌شود و اینجا قابل تغییر نیست. رمزش هم در Active Directory عوض می‌شود."
+  "ldap_roles_note": "این کاربر با Active Directory وارد می‌شود. نقش‌هایش در هر ورود از گروه‌های او در دایرکتوری (config/ldap.yaml) گرفته می‌شود و اینجا قابل تغییر نیست. رمزش هم در Active Directory عوض می‌شود.",
+  "organization": "سازمان",
+  "no_org": "— (سایت / ناحیه در ادامه)",
+  "scope_org": "سازمان {org}"
  },
  "cfg": {
   "devices_title": "دستگاه‌ها",
@@ -978,5 +985,116 @@
   "end": "بستن نشست",
   "end_text": "آن مرورگر از سیستم خارج شود؟",
   "ldap_password_note": "شما با حساب سازمانی (Active Directory) وارد شده‌اید. رمز را در ویندوز یا از واحد IT عوض کنید."
+ },
+ "quality_reason": {
+  "comm_failure": "قطع ارتباط",
+  "out_of_range": "خارج از محدوده",
+  "stale": "ورودی کهنه",
+  "config_error": "خطای پیکربندی",
+  "device_reported": "اعلام‌شده توسط تجهیز",
+  "math_error": "خطای محاسبه",
+  "input_bad": "ورودی نامعتبر یا مفقود",
+  "manual": "دستی"
+ },
+ "write_class": {
+  "setpoint": "مقدار تنظیم",
+  "command": "فرمان"
+ },
+ "location_kind": {
+  "campus": "پردیس",
+  "building": "ساختمان",
+  "floor": "طبقه",
+  "zone": "زون",
+  "room": "اتاق"
+ },
+ "equipment_status": {
+  "in_service": "در سرویس",
+  "maintenance": "در تعمیر",
+  "out_of_service": "خارج از سرویس",
+  "retired": "از رده خارج"
+ },
+ "maintenance_kind": {
+  "inspection": "بازدید",
+  "preventive": "نگهداری پیشگیرانه",
+  "corrective": "تعمیر",
+  "calibration": "کالیبراسیون",
+  "replacement": "تعویض",
+  "note": "یادداشت"
+ },
+ "building": {
+  "title": "ساختمان",
+  "tree": "مکان‌ها",
+  "empty": "هنوز مدل ساختمان تعریف نشده است (config/building.yaml).",
+  "col_equipment": "تجهیز",
+  "col_type": "نوع",
+  "col_place": "محل",
+  "col_status": "وضعیت",
+  "col_role": "نقطه",
+  "col_received": "دریافت",
+  "site": "سایت",
+  "organization": "سازمان",
+  "level": "شمارهٔ طبقه",
+  "area_m2": "مساحت (مترمربع)",
+  "no_equipment": "تجهیزی در این مکان نیست.",
+  "open_device": "دستگاه",
+  "manufacturer": "سازنده",
+  "model": "مدل",
+  "serial_number": "شمارهٔ سریال",
+  "installed_on": "تاریخ نصب",
+  "warranty_until": "پایان گارانتی",
+  "system": "سیستم",
+  "documents": "مدارک",
+  "points": "نقاط",
+  "no_points": "نقطه‌ای تعریف نشده است.",
+  "maintenance": "سوابق تعمیر و نگهداری",
+  "add_record": "ثبت سابقه",
+  "no_records": "هنوز سابقه‌ای ثبت نشده است.",
+  "performed_at": "تاریخ",
+  "kind": "نوع",
+  "description": "شرح",
+  "performed_by": "انجام‌دهنده",
+  "work_order": "دستور کار",
+  "entered_by": "ثبت‌کننده",
+  "record_saved": "سابقه ثبت شد",
+  "record_incomplete": "تاریخ و شرح را وارد کنید."
+ },
+ "calc": {
+  "title": "تگ‌های محاسباتی",
+  "intro": "مقادیری که هاب با فرمول کنترل‌شده (واحد، نوع داده، ورودی مفقود) از تگ‌های دیگر محاسبه می‌کند. هر تغییر فرمول به‌صورت یک نسخه نگه داشته می‌شود.",
+  "empty": "هنوز تگ محاسباتی تعریف نشده است.",
+  "new": "تگ محاسباتی جدید",
+  "edit_title": "ویرایش {tag}",
+  "col_tag": "تگ",
+  "col_formula": "فرمول",
+  "col_version": "نسخه",
+  "versions": "نسخه‌ها",
+  "versions_of": "نسخه‌های {tag}",
+  "valid_from": "معتبر از",
+  "no_versions": "هنوز نسخه‌ای ذخیره نشده است.",
+  "site": "سایت",
+  "area": "ناحیه",
+  "device": "دستگاه محاسباتی",
+  "name": "نام تگ",
+  "description": "شرح",
+  "formula": "فرمول",
+  "formula_hint": "مثال: p1 + p2 · if(flow > 0[m3/h], p / flow, 0) · tr - ts · integrate(p) · runtime(running) · sum_of(\"building_a\", \"active_power\")",
+  "unit": "واحد",
+  "data_type": "نتیجه",
+  "number": "عدد",
+  "condition": "شرط (درست/نادرست)",
+  "missing": "ورودی مفقود",
+  "missing_bad": "نتیجه نامعتبر شود",
+  "missing_skip": "کنار گذاشته شود (تجمیع‌ها)",
+  "inputs": "ورودی‌ها",
+  "add_input": "افزودن ورودی",
+  "preview": "پیش‌نمایش",
+  "publish": "انتشار",
+  "preview_result": "نتیجهٔ فعلی:",
+  "invalid": "فرمول معتبر نیست",
+  "at_char": "نویسهٔ {n}",
+  "bad_ids": "سایت، ناحیه، دستگاه و نام: فقط حروف کوچک انگلیسی، رقم و _.",
+  "bad_alias": "نام ورودی‌ها: حروف کوچک انگلیسی، رقم و _ (حداکثر ۳۲).",
+  "not_calc_device": "این دستگاه، دستگاه محاسباتی نیست.",
+  "published": "منتشر شد"
  }
 }

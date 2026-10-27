@@ -24,6 +24,9 @@ from hub.drivers.base import AnyDevice, DeviceStatus
 from hub.models import (
     INTEGER_RANGES,
     QUALITY_CODES,
+    REASON_CODES,
+    BuildingFile,
+    CalcTag,
     DataType,
     EnipTag,
     FinsTag,
@@ -41,9 +44,11 @@ from hub.models import (
 from hub.storage.records import (
     AlarmRecord,
     AuthAuditRecord,
+    CollectionError,
     DeviceStatusRecord,
     HistoryPoint,
     LatestValue,
+    MaintenanceRecord,
     PendingWrite,
     RoleGrant,
     SessionRecord,
@@ -59,6 +64,7 @@ _SECURITY_EVENTS = frozenset({"login_failed", "login_throttled", "locked", "mfa_
                               "directory_unavailable"})
 
 _QUALITY_BY_CODE = {v: k for k, v in QUALITY_CODES.items()}
+_REASON_BY_CODE = {v: k for k, v in REASON_CODES.items()}
 _INTEGER_TYPES = frozenset(INTEGER_RANGES)
 
 _USER_FIELDS = {"display_name", "password_hash", "is_active", "failed_logins", "locked_until",
@@ -91,12 +97,15 @@ def _split(value: object) -> tuple[float | None, bool | None, str | None]:
 
 
 _UNNEST = ("unnest(%s::integer[], %s::timestamptz[], %s::float8[], %s::boolean[], %s::text[], "
-           "%s::smallint[])")
+           "%s::smallint[], %s::smallint[])")
+_UNNEST_LATEST = ("unnest(%s::integer[], %s::timestamptz[], %s::float8[], %s::boolean[], "
+                  "%s::text[], %s::smallint[], %s::smallint[], %s::timestamptz[])")
 
 
-def _columns(rows: Sequence[tuple]) -> tuple[list[Any], ...]:
-    """Sample rows (tag_id, ts, num, bool, text, quality) as six arrays for _UNNEST."""
-    return tuple(list(column) for column in zip(*rows, strict=True)) if rows else ([],) * 6
+def _columns(rows: Sequence[tuple], width: int = 7) -> tuple[list[Any], ...]:
+    """Sample rows (tag_id, ts, num, bool, text, quality, reason[, received_at]) as arrays for
+    _UNNEST / _UNNEST_LATEST."""
+    return tuple(list(column) for column in zip(*rows, strict=True)) if rows else ([],) * width
 
 
 def _join(data_type: str, num: float | None, flag: bool | None, text: str | None) -> Any:
@@ -130,6 +139,8 @@ def _address(tag: TagBase) -> dict[str, Any]:
         return {"address": tag.address.upper()}
     if isinstance(tag, EnipTag):
         return {"tag": tag.tag} | ({"bit": tag.bit} if tag.bit is not None else {})
+    if isinstance(tag, CalcTag):
+        return {"formula": tag.formula, "inputs": dict(tag.inputs)}
     if isinstance(tag, Iec104Tag):
         return {"ioa": tag.ioa, "type": tag.type} | (
             {"command_ioa": tag.command_ioa} if tag.command_ioa else {})
@@ -166,7 +177,8 @@ class PostgresStore:
         """Mirror the YAML config: upsert devices/tags, retire what disappeared."""
         async with self._conn() as conn, conn.transaction():
             for d in devices:
-                conn_json = d.connection.model_dump(mode="json")
+                connection = getattr(d, "connection", None)    # calc devices have none
+                conn_json = connection.model_dump(mode="json") if connection else {}
                 await conn.execute(
                     "INSERT INTO devices (device_id, name, site, area, protocol, enabled, "
                     "connection, description) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
@@ -180,17 +192,20 @@ class PostgresStore:
                 for t in d.tags:
                     await conn.execute(
                         "INSERT INTO tags (device_id, name, description, data_type, unit, scale,"
-                        ' "offset", access, min_value, max_value, address) '
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                        ' "offset", access, min_value, max_value, address, write_class) '
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                         "ON CONFLICT (device_id, name) DO UPDATE SET "
                         "description=EXCLUDED.description, data_type=EXCLUDED.data_type, "
                         'unit=EXCLUDED.unit, scale=EXCLUDED.scale, "offset"=EXCLUDED."offset", '
                         "access=EXCLUDED.access, min_value=EXCLUDED.min_value, "
                         "max_value=EXCLUDED.max_value, address=EXCLUDED.address, "
-                        "updated_at=now(), retired_at=NULL",
+                        "write_class=EXCLUDED.write_class, updated_at=now(), retired_at=NULL",
                         (d.device_id, t.name, t.description, str(t.data_type), t.unit, t.scale,
-                         t.offset, str(t.access), t.min, t.max, Jsonb(_address(t))),
+                         t.offset, str(t.access), t.min, t.max, Jsonb(_address(t)),
+                         t.write_class and str(t.write_class)),
                     )
+                    if isinstance(t, CalcTag):
+                        await self._record_calc_version(conn, d.device_id, t)
                 await conn.execute(
                     "UPDATE tags SET retired_at=now() WHERE device_id=%s AND retired_at IS NULL "
                     "AND NOT (name = ANY(%s))", (d.device_id, [t.name for t in d.tags]))
@@ -204,6 +219,29 @@ class PostgresStore:
                 "UPDATE tags SET retired_at=now() WHERE retired_at IS NULL AND device_id IN "
                 "(SELECT device_id FROM devices WHERE retired_at IS NOT NULL)")
         return await self.tags()
+
+    async def _record_calc_version(self, conn: Any, device_id: str, tag: CalcTag) -> None:
+        """A new row when the definition differs from the one in force (by version hash)."""
+        from hub.calc.engine import definition_version
+
+        version = definition_version(tag)
+        definition = tag.model_dump(mode="json", include={
+            "formula", "inputs", "unit", "data_type", "missing", "stale_s", "max_gap_s",
+            "min_interval_s", "period_s"})
+        await conn.execute(
+            "INSERT INTO calc_versions (tag_id, version, definition) "
+            "SELECT t.tag_id, %s, %s FROM tags t WHERE t.device_id=%s AND t.name=%s "
+            "AND %s IS DISTINCT FROM (SELECT v.version FROM calc_versions v "
+            "WHERE v.tag_id=t.tag_id ORDER BY v.valid_from DESC LIMIT 1)",
+            (version, Jsonb(definition), device_id, tag.name, version))
+
+    async def calc_versions(self, tag_path: str) -> list[dict[str, Any]]:
+        async with self._conn() as conn:
+            rows = await (await conn.execute(
+                "SELECT v.valid_from, v.version, v.definition FROM calc_versions v "
+                "JOIN tag_paths p USING (tag_id) WHERE p.tag_path=%s ORDER BY v.valid_from DESC",
+                (tag_path,))).fetchall()
+        return [dict(r) for r in rows]
 
     async def tags(self) -> dict[str, TagRecord]:
         async with self._conn() as conn:
@@ -229,7 +267,8 @@ class PostgresStore:
                 log.warning("sample for unknown tag %s dropped", s.tag)
                 continue
             num, flag, text = _split(s.value)
-            rows.append((tag_id, s.timestamp, num, flag, text, QUALITY_CODES[s.quality]))
+            rows.append((tag_id, s.timestamp, num, flag, text, QUALITY_CODES[s.quality],
+                         REASON_CODES[s.reason] if s.reason else None, s.received_at))
         if not rows:
             return 0
         latest: dict[int, tuple] = {}
@@ -241,21 +280,25 @@ class PostgresStore:
         # _UNNEST is a constant; every value is a parameter.
         async with self._conn() as conn, conn.transaction():
             await conn.execute(
-                "INSERT INTO samples (tag_id, ts, value_num, value_bool, value_text, quality) "
-                f"SELECT * FROM {_UNNEST} ON CONFLICT (tag_id, ts) DO NOTHING",  # nosec B608
-                _columns(rows))
+                "INSERT INTO samples (tag_id, ts, value_num, value_bool, value_text, quality, "
+                f"reason) SELECT * FROM {_UNNEST} "  # nosec B608
+                "ON CONFLICT (tag_id, ts) DO NOTHING",
+                _columns([r[:7] for r in rows]))
             await conn.execute(
-                "INSERT INTO tag_latest (tag_id, ts, value_num, value_bool, value_text, quality) "
-                f"SELECT * FROM {_UNNEST} ON CONFLICT (tag_id) DO UPDATE SET "  # nosec B608
+                "INSERT INTO tag_latest (tag_id, ts, value_num, value_bool, value_text, quality, "
+                f"reason, received_at) SELECT * FROM {_UNNEST_LATEST} "  # nosec B608
+                "ON CONFLICT (tag_id) DO UPDATE SET "
                 "ts=EXCLUDED.ts, value_num=EXCLUDED.value_num, "
                 "value_bool=EXCLUDED.value_bool, value_text=EXCLUDED.value_text, "
-                "quality=EXCLUDED.quality WHERE tag_latest.ts <= EXCLUDED.ts",
-                _columns(list(latest.values())))
+                "quality=EXCLUDED.quality, reason=EXCLUDED.reason, "
+                "received_at=EXCLUDED.received_at WHERE tag_latest.ts <= EXCLUDED.ts",
+                _columns(list(latest.values()), 8))
         return len(rows)
 
     async def latest(self, tag_paths: Iterable[str] | None = None) -> list[LatestValue]:
         sql = ("SELECT p.tag_path, p.data_type, l.ts, l.value_num, l.value_bool, l.value_text, "
-               "l.quality FROM tag_latest l JOIN tag_paths p USING (tag_id)")
+               "l.quality, l.reason, l.received_at FROM tag_latest l JOIN tag_paths p "
+               "USING (tag_id)")
         params: tuple = ()
         if tag_paths is not None:
             sql += " WHERE p.tag_path = ANY(%s)"
@@ -265,7 +308,9 @@ class PostgresStore:
         return [LatestValue(tag_path=r["tag_path"], ts=r["ts"],
                             value=_join(r["data_type"], r["value_num"], r["value_bool"],
                                         r["value_text"]),
-                            quality=_QUALITY_BY_CODE[r["quality"]]) for r in rows]
+                            quality=_QUALITY_BY_CODE[r["quality"]],
+                            reason=_REASON_BY_CODE.get(r["reason"]),
+                            received_at=r["received_at"]) for r in rows]
 
     async def history(self, tag_path: str, start: datetime, end: datetime,
                       max_points: int = 1000) -> list[HistoryPoint]:
@@ -454,12 +499,12 @@ class PostgresStore:
         return [RoleGrant.model_validate(r) for r in rows]
 
     async def grant_role(self, user_id: int, role_id: str, site: str | None, area: str | None,
-                         granted_by: int | None) -> RoleGrant:
+                         granted_by: int | None, org_id: str | None = None) -> RoleGrant:
         async with self._conn() as conn:
             row = await (await conn.execute(
-                "INSERT INTO user_roles (user_id, role_id, site, area, granted_by) "
-                "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                (user_id, role_id, site, area, granted_by))).fetchone()
+                "INSERT INTO user_roles (user_id, role_id, site, area, granted_by, org_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                (user_id, role_id, site, area, granted_by, org_id))).fetchone()
         return RoleGrant.model_validate(row)
 
     async def replace_roles(self, user_id: int,
@@ -1010,3 +1055,136 @@ class PostgresStore:
         async with self._conn() as conn:
             row = await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone()
         return row["now"]  # type: ignore[index]
+
+    # --- building model (mirror of config/building.yaml) ----------------------------------------
+
+    async def sync_building(self, building: BuildingFile) -> None:
+        """Upsert organizations, locations, systems, equipment and points; retire what is gone.
+        Points whose tag is not in the database (yet) are skipped."""
+        b = building
+        async with self._conn() as conn, conn.transaction():
+            await conn.execute("SET CONSTRAINTS ALL DEFERRED")
+            for org in b.organizations:
+                await conn.execute(
+                    "INSERT INTO organizations (org_id, name) VALUES (%s,%s) ON CONFLICT (org_id)"
+                    " DO UPDATE SET name=EXCLUDED.name, updated_at=now(), retired_at=NULL",
+                    (org.id, org.name))
+            await conn.execute("DELETE FROM organization_sites")
+            for org in b.organizations:
+                for site in org.sites:
+                    await conn.execute("INSERT INTO organization_sites (site, org_id) VALUES "
+                                       "(%s,%s) ON CONFLICT (site) DO NOTHING", (site, org.id))
+            for loc in b.locations:
+                await conn.execute(
+                    "INSERT INTO locations (location_id, kind, name, parent_id, site, level, "
+                    "area_m2, description, haystack, brick_class) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (location_id) DO UPDATE "
+                    "SET kind=EXCLUDED.kind, name=EXCLUDED.name, parent_id=EXCLUDED.parent_id, "
+                    "site=EXCLUDED.site, level=EXCLUDED.level, area_m2=EXCLUDED.area_m2, "
+                    "description=EXCLUDED.description, haystack=EXCLUDED.haystack, "
+                    "brick_class=EXCLUDED.brick_class, updated_at=now(), retired_at=NULL",
+                    (loc.id, str(loc.kind), loc.name, loc.parent, loc.site, loc.level,
+                     loc.area_m2, loc.description, list(loc.haystack), loc.brick_class))
+            for s in b.systems:
+                await conn.execute(
+                    "INSERT INTO building_systems (system_id, kind, name, building_id, "
+                    "description, haystack, brick_class) VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (system_id) DO UPDATE SET kind=EXCLUDED.kind, "
+                    "name=EXCLUDED.name, building_id=EXCLUDED.building_id, "
+                    "description=EXCLUDED.description, haystack=EXCLUDED.haystack, "
+                    "brick_class=EXCLUDED.brick_class, updated_at=now(), retired_at=NULL",
+                    (s.id, str(s.kind), s.name, s.building, s.description, list(s.haystack),
+                     s.brick_class))
+            await conn.execute("DELETE FROM equipment_points")
+            for e in b.equipment:
+                await conn.execute(
+                    "INSERT INTO equipment (equipment_id, name, type, location_id, system_id, "
+                    "device_id, manufacturer, model, serial_number, status, installed_on, "
+                    "warranty_until, description, documents, haystack, brick_class) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (equipment_id) "
+                    "DO UPDATE SET name=EXCLUDED.name, type=EXCLUDED.type, "
+                    "location_id=EXCLUDED.location_id, system_id=EXCLUDED.system_id, "
+                    "device_id=EXCLUDED.device_id, manufacturer=EXCLUDED.manufacturer, "
+                    "model=EXCLUDED.model, serial_number=EXCLUDED.serial_number, "
+                    "status=EXCLUDED.status, installed_on=EXCLUDED.installed_on, "
+                    "warranty_until=EXCLUDED.warranty_until, description=EXCLUDED.description, "
+                    "documents=EXCLUDED.documents, haystack=EXCLUDED.haystack, "
+                    "brick_class=EXCLUDED.brick_class, updated_at=now(), retired_at=NULL",
+                    (e.id, e.name, e.type, e.location, e.system, e.device, e.manufacturer,
+                     e.model, e.serial_number, str(e.status), e.installed_on, e.warranty_until,
+                     e.description, Jsonb([d.model_dump() for d in e.documents]),
+                     list(e.haystack), e.brick_class))
+                for p in e.points:
+                    await conn.execute(
+                        "INSERT INTO equipment_points (equipment_id, role, tag_id, description, "
+                        "haystack, brick_class) SELECT %s, %s, tag_id, %s, %s, %s FROM tag_paths "
+                        "WHERE tag_path=%s",
+                        (e.id, p.role, p.description, list(p.haystack), p.brick_class, p.tag))
+            for table, key, ids in (
+                    ("organizations", "org_id", [o.id for o in b.organizations]),
+                    ("locations", "location_id", [loc.id for loc in b.locations]),
+                    ("building_systems", "system_id", [s.id for s in b.systems]),
+                    ("equipment", "equipment_id", [e.id for e in b.equipment])):
+                await conn.execute(  # table/key are the constants above
+                    f"UPDATE {table} SET retired_at=now() WHERE retired_at IS NULL "  # nosec B608
+                    f"AND NOT ({key} = ANY(%s))", (ids,))
+
+    async def add_maintenance_record(self, *, equipment_id: str, performed_at: datetime,
+                                     kind: str, description: str, performed_by: str | None,
+                                     work_order: str | None, created_by: int
+                                     ) -> MaintenanceRecord:
+        async with self._conn() as conn:
+            row = await (await conn.execute(
+                "INSERT INTO maintenance_records (equipment_id, performed_at, kind, description, "
+                "performed_by, work_order, created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                "RETURNING *", (equipment_id, performed_at, kind, description, performed_by,
+                                work_order, created_by))).fetchone()
+        return MaintenanceRecord.model_validate(row)
+
+    async def maintenance_records(self, equipment_id: str, limit: int = 200
+                                  ) -> list[MaintenanceRecord]:
+        async with self._conn() as conn:
+            rows = await (await conn.execute(
+                "SELECT m.*, u.username AS created_by_name FROM maintenance_records m "
+                "JOIN users u ON u.user_id = m.created_by WHERE m.equipment_id=%s "
+                "ORDER BY m.performed_at DESC, m.record_id DESC LIMIT %s",
+                (equipment_id, limit))).fetchall()
+        return [MaintenanceRecord.model_validate(r) for r in rows]
+
+    async def equipment_known(self, equipment_id: str) -> bool:
+        async with self._conn() as conn:
+            row = await (await conn.execute(
+                "SELECT 1 AS ok FROM equipment WHERE equipment_id=%s", (equipment_id,))).fetchone()
+        return row is not None
+
+    # --- collection errors --------------------------------------------------------------------
+
+    async def add_collection_errors(self, errors: Sequence[tuple[datetime, str, str, str]]
+                                    ) -> None:
+        """(ts, device_id, state, message) rows; devices unknown to the database are skipped."""
+        if not errors:
+            return
+        async with self._conn() as conn:
+            await conn.execute(
+                "INSERT INTO collection_errors (ts, device_id, state, message) "
+                "SELECT e.ts, e.device_id, e.state, left(e.message, 1000) FROM "
+                "unnest(%s::timestamptz[], %s::text[], %s::text[], %s::text[]) "
+                "AS e(ts, device_id, state, message) JOIN devices d USING (device_id)",
+                tuple(list(c) for c in zip(*errors, strict=True)))
+
+    async def collection_errors(self, device_id: str | None = None, limit: int = 200
+                                ) -> list[CollectionError]:
+        sql, params = "SELECT * FROM collection_errors", []
+        if device_id:
+            sql += " WHERE device_id=%s"
+            params.append(device_id)
+        async with self._conn() as conn:
+            rows = await (await conn.execute(sql + " ORDER BY ts DESC, id DESC LIMIT %s",
+                                             (*params, limit))).fetchall()
+        return [CollectionError.model_validate(r) for r in rows]
+
+    async def delete_collection_errors_before(self, cutoff: datetime) -> int:
+        async with self._conn() as conn:
+            cur = await conn.execute("DELETE FROM collection_errors WHERE ts < %s", (cutoff,))
+            return cur.rowcount
+

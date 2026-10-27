@@ -7,7 +7,7 @@ import {
   errorText, areaName, siteName, table,
 } from '../ui.js';
 import { sparkline } from '../chart.js';
-import { store, bus, canTag, isNumeric, deviceLastSeen } from '../store.js';
+import { store, bus, canWriteTag, isNumeric, deviceLastSeen } from '../store.js';
 import { openWriteDialog } from '../control-dialog.js';
 
 export async function render(page, { params, navigate, setTitle }) {
@@ -59,13 +59,17 @@ export async function render(page, { params, navigate, setTitle }) {
     { label: t('device.col_access'), render: (tag) => (tag.access === 'read_write' ? badge(t('access.read_write'), 'rw') : badge(t('access.read'), 'unknown')) },
     { label: '', cls: 'actions', render: (tag) => h('div', { class: 'row end' },
       isNumeric(tag) || tag.data_type === 'bool' ? button(t('device.trend'), () => navigate(`trends?tag=${encodeURIComponent(tag.tag)}`), { size: 'sm', iconName: 'trend' }) : null,
-      tag.access === 'read_write' && canTag('tag.write', tag.tag) ? button(t('device.command'), () => openWriteDialog(tag.tag), { size: 'sm', kind: 'primary', iconName: 'control' }) : null) },
+      tag.access === 'read_write' && canWriteTag(tag) ? button(t('device.command'), () => openWriteDialog(tag.tag), { size: 'sm', kind: 'primary', iconName: 'control' }) : null) },
   ];
 
   const current = (tag) => store.tags.get(tag.tag) || tag;
   function fillValue(tag) { const c = rows.get(tag.tag)?.value; if (c) { mount(c, valueNode(tag, current(tag).value)); c.classList.remove('flash-val'); void c.offsetWidth; c.classList.add('flash-val'); } }
   function fillSpark(tag) { const c = rows.get(tag.tag)?.spark; if (c && isNumeric(tag)) mount(c, sparkline(store.trail.get(tag.tag) || [])); }
-  function fillQuality(tag) { const c = rows.get(tag.tag)?.quality; if (c) mount(c, qualityBadge(current(tag).quality)); }
+  function fillQuality(tag) {
+    const c = rows.get(tag.tag)?.quality;
+    const reason = current(tag).reason;
+    if (c) mount(c, qualityBadge(current(tag).quality), reason ? h('span', { class: 'tiny faint' }, ` ${t(`quality_reason.${reason}`)}`) : null);
+  }
   function fillTime(tag) { const c = rows.get(tag.tag)?.time; if (c) c.textContent = fmtDate(current(tag).ts, 'timesec'); }
 
   drawHead();

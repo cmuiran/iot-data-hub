@@ -6,9 +6,10 @@ import {
   h, mount, table, button, badge, modal, field, input, select, notice, errorText, toast,
   confirmDialog, siteName, areaName, empty,
 } from '../ui.js';
-import { store, siteTree } from '../store.js';
+import { store, siteTree, can } from '../store.js';
 
 function scopeText(g) {
+  if (g.organization) return t('users.scope_org', { org: g.organization });
   if (!g.site) return t('users.scope_all');
   return g.area ? `${siteName(g.site)} › ${areaName(g.area)}` : siteName(g.site);
 }
@@ -18,8 +19,9 @@ function roleChip(g) {
 }
 
 /** Role + scope pickers; returns {el, value()} */
-function grantPicker(roles) {
+function grantPicker(roles, organizations = []) {
   const tree = siteTree();
+  const org = select([{ value: '', label: t('users.no_org') }, ...organizations.map((o) => ({ value: o.id, label: o.name }))], '');
   const role = select(roles.map((r) => ({ value: r, label: t(`roles.${r}`) })), roles.includes('viewer') ? 'viewer' : roles[0]);
   const site = select([{ value: '', label: t('users.scope_all') }, ...[...tree.keys()].map((s) => ({ value: s, label: siteName(s) }))], '');
   const area = select([{ value: '', label: t('users.all_areas') }], '');
@@ -29,9 +31,13 @@ function grantPicker(roles) {
     area.disabled = !site.value;
   });
   area.disabled = true;
+  org.addEventListener('change', () => { site.disabled = Boolean(org.value); if (org.value) { site.value = ''; area.value = ''; area.disabled = true; } });
   return {
-    el: h('div', { class: 'form-grid' }, field(t('users.role'), role), field(t('users.site'), site), field(t('users.area'), area)),
-    value: () => ({ role: role.value, site: site.value || null, area: area.value || null }),
+    el: h('div', { class: 'form-grid' }, field(t('users.role'), role),
+      organizations.length ? field(t('users.organization'), org) : null,
+      field(t('users.site'), site), field(t('users.area'), area)),
+    value: () => (org.value ? { role: role.value, organization: org.value, site: null, area: null }
+      : { role: role.value, site: site.value || null, area: area.value || null }),
   };
 }
 
@@ -42,10 +48,15 @@ export async function render(page, { setTitle }) {
   const box = h('div', { class: 'card flush' });
   let roles = {};
   let users = [];
+  let organizations = [];
 
   async function load() {
     try {
       [roles, users] = await Promise.all([api('api/roles'), api('api/users')]);
+      // organizations of the building model (readable with model.edit; otherwise none offered)
+      if (can('model.edit')) {
+        try { organizations = (await api('api/config/building')).organizations || []; } catch { organizations = []; }
+      }
       draw();
     } catch (err) { mount(box, notice(errorText(err), 'bad')); }
   }
@@ -73,7 +84,7 @@ export async function render(page, { setTitle }) {
     const display = input({ maxlength: 128 });
     const password = input({ ltr: true, type: 'password', autocomplete: 'new-password' });
     const lang = select([{ value: 'fa', label: t('language.fa') }, { value: 'en', label: t('language.en') }], 'fa');
-    const grant = grantPicker(Object.keys(roles));
+    const grant = grantPicker(Object.keys(roles), organizations);
     modal({
       title: t('users.new'), wide: true,
       body: h('div', { class: 'stack' },
@@ -108,7 +119,7 @@ export async function render(page, { setTitle }) {
     function drawDetail() {
       const display = input({ value: user.display_name, maxlength: 128 });
       const lang = select([{ value: 'fa', label: t('language.fa') }, { value: 'en', label: t('language.en') }], user.language);
-      const grant = grantPicker(Object.keys(roles));
+      const grant = grantPicker(Object.keys(roles), organizations);
       const self = user.user_id === store.me.user_id;
       const directory = user.auth_source === 'ldap';   // password and roles come from AD
       mount(body,

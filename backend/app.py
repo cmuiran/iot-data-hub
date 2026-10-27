@@ -18,11 +18,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import (
     auth,
+    calc,
     config,
     control,
     dashboards,
     data,
     metrics,
+    model,
     reports,
     schedules,
     system,
@@ -179,8 +181,8 @@ def create_app(services: Services) -> FastAPI:
         return JSONResponse({"error": "internal", "message": "internal server error"},
                             status_code=500)
 
-    for module in (auth, users, data, control, config, dashboards, reports, schedules, system,
-                   metrics, ws):
+    for module in (auth, users, data, control, config, model, calc, dashboards, reports,
+                   schedules, system, metrics, ws):
         app.include_router(module.router)
     _mount_frontend(app, services.settings.frontend_dir)
     app.add_middleware(ApiVersions)   # outermost: /api/v1 is mapped before the guards run

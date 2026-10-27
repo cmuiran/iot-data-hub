@@ -36,6 +36,7 @@ from hub.models import (
     MqttDevice,
     MqttTag,
     Quality,
+    QualityReason,
     TagBase,
     parse_device_timestamp,
     parse_json_path,
@@ -268,7 +269,8 @@ class MqttJsonDriver(Driver[MqttDevice]):
                 value = coerce(raw, tag.data_type)
             except CodecError as exc:
                 log.warning("%s.%s: %s", self.device.device_id, tag.name, exc)
-                samples.append(self.make_sample(tag, None, timestamp=timestamp))
+                samples.append(self.make_sample(tag, None, timestamp=timestamp,
+                                                reason=QualityReason.CONFIG_ERROR))
                 continue
             samples.append(self.make_sample(tag, value, quality=ts_quality, timestamp=timestamp))
             self._last[tag.name] = (value, received)

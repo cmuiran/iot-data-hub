@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -115,6 +115,14 @@ class Access(StrEnum):
     READ_WRITE = "read_write"
 
 
+class WriteClass(StrEnum):
+    """What a write to a read_write tag does. Separate permissions: a user allowed to adjust
+    setpoints (temperatures, limits) is not thereby allowed to start or stop equipment."""
+
+    SETPOINT = "setpoint"
+    COMMAND = "command"
+
+
 class TagBase(_Strict):
     """Protocol-independent part of a tag.
 
@@ -128,6 +136,9 @@ class TagBase(_Strict):
     unit: str | None = None
     data_type: DataType
     access: Access = Access.READ
+    write_class: WriteClass | None = Field(
+        default=None,
+        description="read_write tags: setpoint or command (unset = command, the stricter one)")
     scale: float = 1.0
     offset: float = 0.0
     min: float | None = None
@@ -177,6 +188,8 @@ class TagBase(_Strict):
         if self.min is not None and self.max is not None and self.min >= self.max:
             raise ValueError(f"min ({self.min:g}) must be less than max ({self.max:g})")
 
+        if self.write_class is not None and self.access is not Access.READ_WRITE:
+            raise ValueError("write_class only applies to read_write tags")
         if self.access is Access.READ_WRITE:
             if self.data_type is DataType.STRING:
                 raise ValueError("read_write string tags are not supported; use access: read")
@@ -1306,13 +1319,62 @@ class Iec104Device(DeviceBase):
     tags: list[Iec104Tag] = Field(default_factory=list)
 
 
+# --- Calculated (virtual) tags ----------------------------------------------------------------
+
+CALC_ALIAS_PATTERN = r"[a-z][a-z0-9_]{0,31}"
+CalcAlias = Annotated[str, Field(pattern=rf"^{CALC_ALIAS_PATTERN}$")]
+CALC_DATA_TYPES = frozenset({DataType.FLOAT64, DataType.FLOAT32, DataType.BOOL})
+
+
+class CalcTag(TagBase):
+    """A tag computed by the hub from other tags (``hub.calc``). Always read-only.
+
+    ``formula`` uses the safe formula language of ``hub.calc.expr`` (no code execution);
+    ``inputs`` give short names to tag paths (``p1: kish.substation.meter_01.active_power``).
+    Units are checked when the configuration is loaded.
+    """
+
+    formula: str = Field(min_length=1, max_length=2000)
+    inputs: dict[CalcAlias, TagPath] = Field(default_factory=dict, max_length=200)
+    missing: Literal["bad", "skip"] = Field(
+        default="bad", description="an input without a fresh good value: the result is bad, "
+                                   "or (aggregates) the input is left out and the result is "
+                                   "uncertain")
+    stale_s: float = Field(default=300, ge=1, le=86_400,
+                           description="an input older than this counts as missing")
+    min_interval_s: float = Field(default=1.0, ge=0.1, le=3600,
+                                  description="at most one result per this many seconds")
+    period_s: float = Field(default=10.0, ge=1, le=3600,
+                            description="evaluate at least this often even without new input")
+    max_gap_s: float = Field(default=300, ge=1, le=86_400,
+                             description="integrate/runtime: a longer gap is not counted")
+
+    @model_validator(mode="after")
+    def _check_calc(self) -> CalcTag:
+        if self.access is not Access.READ:
+            raise ValueError("calculated tags are read-only")
+        if self.data_type not in CALC_DATA_TYPES:
+            raise ValueError("calculated tags are float64, float32 or bool")
+        if self.scale != 1.0 or self.offset != 0.0:
+            raise ValueError("calculated tags have no scale/offset; put it in the formula")
+        return self
+
+
+class CalcDevice(DeviceBase):
+    """A virtual device holding calculated tags. It has no connection: the hub computes it."""
+
+    protocol: Literal["calc"]
+    tags: list[CalcTag] = Field(default_factory=list)
+
+
 AnyModbusDevice = ModbusDevice | ModbusRtuDevice
 AnyDeviceModel = (ModbusDevice | ModbusRtuDevice | MqttDevice | OpcUaDevice | S7Device
-                  | HttpDevice | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device)
+                  | HttpDevice | SnmpDevice | FinsDevice | McDevice | EnipDevice | Iec104Device
+                  | CalcDevice)
 Device = Annotated[AnyDeviceModel, Field(discriminator="protocol")]
 DEVICE_ADAPTER: TypeAdapter[AnyDeviceModel] = TypeAdapter(Device)
 PROTOCOLS = ("modbus_tcp", "modbus_rtu", "mqtt", "opcua", "s7", "http", "snmp", "fins", "mc",
-             "enip", "iec104")
+             "enip", "iec104", "calc")
 
 
 # --------------------------------------------------------------------------------------------
@@ -1550,6 +1612,178 @@ class LdapFile(_Strict):
         if "{username}" not in self.user_filter:
             raise ValueError("user_filter must contain {username}")
         return self
+
+
+# --------------------------------------------------------------------------------------------
+# Building information model (config/building.yaml)
+# --------------------------------------------------------------------------------------------
+# Organization -> Campus -> Building -> Floor -> Zone -> Room; System -> Equipment -> Point.
+# A point refers to an existing tag path: the model sits on top of the tags and never renames
+# them, so history, alarms and control policies are unaffected. ``haystack`` / ``brick_class``
+# are stored for later Project Haystack / Brick Schema export.
+
+HAYSTACK_MARKER_RE = re.compile(r"[a-z][A-Za-z0-9]{0,63}")
+BRICK_CLASS_RE = re.compile(r"[A-Z][A-Za-z0-9_]{0,127}")
+_DOCUMENT_REF_RE = re.compile(r"https?://[^\s]+|[A-Za-z0-9_\-][A-Za-z0-9_\-./ ]{0,500}")
+
+
+def _validate_marker(value: str) -> str:
+    if not HAYSTACK_MARKER_RE.fullmatch(value):
+        raise ValueError(f"{value!r} is not a Haystack marker (camelCase, e.g. supply, temp)")
+    return value
+
+
+def _validate_brick_class(value: str) -> str:
+    if not BRICK_CLASS_RE.fullmatch(value):
+        raise ValueError(f"{value!r} is not a Brick class name "
+                         "(e.g. Supply_Air_Temperature_Sensor)")
+    return value
+
+
+HaystackMarker = Annotated[str, AfterValidator(_validate_marker)]
+BrickClass = Annotated[str, AfterValidator(_validate_brick_class)]
+Name = Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class LocationKind(StrEnum):
+    CAMPUS = "campus"
+    BUILDING = "building"
+    FLOOR = "floor"
+    ZONE = "zone"
+    ROOM = "room"
+
+
+# which kinds may be the parent of each kind (None = top level)
+LOCATION_PARENTS: dict[LocationKind, frozenset[LocationKind | None]] = {
+    LocationKind.CAMPUS: frozenset({None}),
+    LocationKind.BUILDING: frozenset({LocationKind.CAMPUS}),
+    LocationKind.FLOOR: frozenset({LocationKind.BUILDING}),
+    LocationKind.ZONE: frozenset({LocationKind.FLOOR}),
+    LocationKind.ROOM: frozenset({LocationKind.FLOOR, LocationKind.ZONE}),
+}
+
+
+class SystemKind(StrEnum):
+    HVAC = "hvac"
+    ELECTRICAL = "electrical"
+    WATER = "water"
+    LIGHTING = "lighting"
+    FIRE = "fire"              # monitoring only: never a write target
+    ACCESS = "access"
+    ELEVATOR = "elevator"
+    SECURITY = "security"
+    METERING = "metering"
+    OTHER = "other"
+
+
+class EquipmentStatus(StrEnum):
+    IN_SERVICE = "in_service"
+    MAINTENANCE = "maintenance"
+    OUT_OF_SERVICE = "out_of_service"
+    RETIRED = "retired"
+
+
+class Organization(_Strict):
+    id: Segment
+    name: Name
+    sites: list[Segment] = Field(min_length=1, description="tag-path sites of this organization")
+
+
+class Location(_Strict):
+    id: Segment
+    kind: LocationKind
+    name: Name
+    parent: Segment | None = None
+    site: Segment | None = Field(default=None, description="campus: its tag-path site")
+    level: int | None = Field(default=None, ge=-20, le=300, description="floor number")
+    area_m2: float | None = Field(default=None, gt=0)
+    description: str | None = Field(default=None, max_length=500)
+    haystack: list[HaystackMarker] = Field(default_factory=list, max_length=32)
+    brick_class: BrickClass | None = None
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> Location:
+        if self.kind is LocationKind.CAMPUS and self.site is None:
+            raise ValueError("a campus needs site (the first segment of its tag paths)")
+        if self.kind is not LocationKind.CAMPUS and self.site is not None:
+            raise ValueError("site is set on the campus; buildings and below inherit it")
+        if self.level is not None and self.kind is not LocationKind.FLOOR:
+            raise ValueError("level only applies to floors")
+        return self
+
+
+class BuildingSystem(_Strict):
+    id: Segment
+    kind: SystemKind
+    name: Name
+    building: Segment
+    description: str | None = Field(default=None, max_length=500)
+    haystack: list[HaystackMarker] = Field(default_factory=list, max_length=32)
+    brick_class: BrickClass | None = None
+
+
+class EquipmentDocument(_Strict):
+    title: Name
+    ref: str = Field(description="https:// link or a path in the document store")
+
+    @field_validator("ref")
+    @classmethod
+    def _check_ref(cls, value: str) -> str:
+        if not _DOCUMENT_REF_RE.fullmatch(value) or ".." in value:
+            raise ValueError(f"{value!r}: use an http(s) link or a relative path without '..'")
+        return value
+
+
+class Point(_Strict):
+    """One tag of an equipment, with its role (``supply_air_temp``). Unit, data type, range
+    and access come from the tag itself: they are not repeated here."""
+
+    role: Segment
+    tag: TagPath
+    description: str | None = Field(default=None, max_length=500)
+    haystack: list[HaystackMarker] = Field(default_factory=list, max_length=32)
+    brick_class: BrickClass | None = None
+
+
+class Equipment(_Strict):
+    id: Segment
+    name: Name
+    type: Segment = Field(description="ahu, chiller, pump, meter, fcu, ...")
+    location: Segment
+    system: Segment | None = None
+    device: Segment | None = Field(default=None, description="device_id it is read through")
+    manufacturer: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=128)
+    serial_number: str | None = Field(default=None, max_length=128)
+    status: EquipmentStatus = EquipmentStatus.IN_SERVICE
+    installed_on: date | None = None
+    warranty_until: date | None = None
+    description: str | None = Field(default=None, max_length=500)
+    documents: list[EquipmentDocument] = Field(default_factory=list, max_length=50)
+    haystack: list[HaystackMarker] = Field(default_factory=list, max_length=32)
+    brick_class: BrickClass | None = None
+    points: list[Point] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="after")
+    def _check_points(self) -> Equipment:
+        roles = [p.role for p in self.points]
+        dup = sorted({r for r in roles if roles.count(r) > 1})
+        if dup:
+            raise ValueError(f"point roles must be unique per equipment: {', '.join(dup)}")
+        tags = [p.tag for p in self.points]
+        dup = sorted({t for t in tags if tags.count(t) > 1})
+        if dup:
+            raise ValueError(f"a tag is listed twice: {', '.join(dup)}")
+        if self.installed_on and self.warranty_until and self.warranty_until < self.installed_on:
+            raise ValueError("warranty_until is before installed_on")
+        return self
+
+
+class BuildingFile(_Strict):
+    organizations: list[Organization] = Field(default_factory=list)
+    locations: list[Location] = Field(default_factory=list)
+    systems: list[BuildingSystem] = Field(default_factory=list)
+    equipment: list[Equipment] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1793,15 +2027,38 @@ class Quality(StrEnum):
 QUALITY_CODES: dict[Quality, int] = {Quality.GOOD: 0, Quality.UNCERTAIN: 1, Quality.BAD: 2}
 
 
+class QualityReason(StrEnum):
+    """Why a sample is not good. Kept apart from the value and the quality level."""
+
+    COMM_FAILURE = "comm_failure"        # device unreachable / connection lost
+    OUT_OF_RANGE = "out_of_range"        # outside the tag's expected min/max
+    STALE = "stale"                      # an input of a calculation is too old
+    CONFIG_ERROR = "config_error"        # the value cannot be decoded with the tag's settings
+    DEVICE_REPORTED = "device_reported"  # the device itself flagged the value (OPC UA, IEC 104)
+    MATH_ERROR = "math_error"            # calculation: division by zero, non-finite result
+    INPUT_BAD = "input_bad"              # calculation: an input is bad or has no value yet
+    MANUAL = "manual"                    # set by a person
+
+
+# Storage codes for QualityReason (samples.reason / tag_latest.reason, smallint).
+REASON_CODES: dict[QualityReason, int] = {r: i + 1 for i, r in enumerate(QualityReason)}
+
+
 class Sample(_Strict):
-    """One normalized reading. Drivers emit these, never raw protocol objects."""
+    """One normalized reading. Drivers emit these, never raw protocol objects.
+
+    ``timestamp`` is the source time when the device provides one, else the hub's time;
+    ``received_at`` is when the hub received it (set by the hub when missing).
+    """
 
     tag: TagPath
     value: bool | int | float | str | None
     timestamp: AwareDatetime
     quality: Quality = Quality.GOOD
+    reason: QualityReason | None = None
+    received_at: AwareDatetime | None = None
 
-    @field_validator("timestamp")
+    @field_validator("timestamp", "received_at")
     @classmethod
-    def _to_utc(cls, value: datetime) -> datetime:
-        return value.astimezone(UTC)
+    def _to_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else value.astimezone(UTC)

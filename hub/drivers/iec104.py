@@ -39,7 +39,7 @@ from hub.drivers.iec104_proto import (
     Endpoint,
     InfoObject,
 )
-from hub.models import DataType, Iec104Device, Iec104Tag, Quality, TagBase
+from hub.models import DataType, Iec104Device, Iec104Tag, Quality, QualityReason, TagBase
 
 log = logging.getLogger(__name__)
 
@@ -200,7 +200,9 @@ class Iec104Driver(Driver[Iec104Device]):
                 stamp = obj.time if obj.time is not None and obj.time <= datetime.now(UTC) \
                     else None
                 samples.append(self.make_sample(tag, value if quality is not Quality.BAD
-                                                else None, quality, stamp))
+                                                else None, quality, stamp,
+                                                QualityReason.DEVICE_REPORTED
+                                                if quality is not Quality.GOOD else None))
         if samples:
             self._changed.set()
             await self.emit(samples)

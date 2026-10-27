@@ -7,10 +7,12 @@ not installed on the server (``timescale="auto"``), so plain PostgreSQL works ou
 
     python -m hub.storage.migrate --database-url postgresql://... [--dry-run]
 
-Rollback safety: migrations only go forward. A database that already has a migration this code
-does not know (it was upgraded by a newer hub) is refused with :class:`SchemaTooNew` instead of
-being used by older code; roll back by restoring the pre-upgrade backup (see docs/backend.md,
-"Upgrade and rollback").
+Rollback safety: a database that already has a migration this code does not know (it was
+upgraded by a newer hub) is refused with :class:`SchemaTooNew` instead of being used by older
+code. Migrations from 0008 on also have a rollback script in ``db/migrations/down/`` with the
+same name: ``--rollback <version>`` runs it for the most recent applied migration, in one
+transaction. Earlier migrations are rolled back by restoring the pre-upgrade backup (see
+docs/backend.md, "Upgrade and rollback").
 """
 
 from __future__ import annotations
@@ -135,12 +137,38 @@ def migrate(database_url: str, timescale: TimescaleMode = "auto",
     return applied_now
 
 
+class RollbackError(RuntimeError):
+    pass
+
+
+def rollback(database_url: str, version: str, directory: Path = MIGRATIONS_DIR) -> None:
+    """Undo ``version`` with ``down/<version>.sql``; only the most recent applied migration."""
+    down = directory / "down" / f"{version}.sql"
+    if not down.is_file():
+        raise RollbackError(f"{version} has no rollback script ({down}); restore the backup "
+                            "taken before the upgrade instead")
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        done = _applied(conn)
+        if version not in done:
+            raise RollbackError(f"{version} is not applied")
+        latest = max(done)
+        if version != latest:
+            raise RollbackError(f"roll back {latest} first (only the most recent migration can "
+                                "be rolled back)")
+        with conn.transaction():
+            conn.execute(down.read_text(encoding="utf-8"))
+            conn.execute("DELETE FROM schema_migrations WHERE version = %s", (version,))
+    log.info("rolled back %s", version)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hub.storage.migrate")
     parser.add_argument("--database-url", default=os.environ.get("HUB_DATABASE_URL"))
     parser.add_argument("--timescale", choices=["auto", "on", "off"],
                         default=os.environ.get("HUB_DB_TIMESCALE", "auto"))
     parser.add_argument("--dry-run", action="store_true", help="only list pending migrations")
+    parser.add_argument("--rollback", metavar="VERSION",
+                        help="undo the most recent migration (e.g. 0008_building_model)")
     args = parser.parse_args(argv)
     if not args.database_url:
         print("set HUB_DATABASE_URL or pass --database-url", file=sys.stderr)
@@ -152,6 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         if state["unknown"]:
             print(f"NEWER than this code: {', '.join(state['unknown'])}", file=sys.stderr)
             return 1
+        return 0
+    if args.rollback:
+        try:
+            rollback(args.database_url, args.rollback)
+        except (RollbackError, psycopg.Error) as exc:
+            print(f"rollback refused: {exc}", file=sys.stderr)
+            return 1
+        print(f"rolled back: {args.rollback}")
         return 0
     try:
         applied = migrate(args.database_url, args.timescale)

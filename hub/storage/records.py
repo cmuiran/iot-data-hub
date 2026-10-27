@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from hub.models import Access, AlarmSeverity, DataType, Quality
+from hub.models import Access, AlarmSeverity, DataType, Quality, QualityReason
 
 
 class _Record(BaseModel):
@@ -33,8 +33,10 @@ class TagRecord(_Record):
 class LatestValue(_Record):
     tag_path: str
     value: bool | int | float | str | None
-    ts: datetime
+    ts: datetime                                  # source time (or hub time)
     quality: Quality
+    reason: QualityReason | None = None           # why it is not good
+    received_at: datetime | None = None           # when the hub received it
 
 
 class HistoryPoint(_Record):
@@ -81,6 +83,7 @@ class RoleGrant(_Record):
     site: str | None
     area: str | None
     granted_by: int | None
+    org_id: str | None = None
     granted_at: datetime
 
 
@@ -154,3 +157,25 @@ class AlarmRecord(_Record):
     @property
     def is_active(self) -> bool:
         return self.cleared_at is None or self.acked_at is None
+
+
+class MaintenanceRecord(_Record):
+    record_id: int
+    equipment_id: str
+    performed_at: datetime
+    kind: str
+    description: str
+    performed_by: str | None = None
+    work_order: str | None = None
+    created_by: int
+    created_by_name: str | None = None
+    created_at: datetime
+
+
+class CollectionError(_Record):
+    id: int
+    ts: datetime
+    device_id: str
+    state: str
+    message: str
+

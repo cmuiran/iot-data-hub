@@ -15,7 +15,7 @@ from backend.deps import ServicesDep, client_addr, require
 from backend.errors import Forbidden, Invalid, NotFound
 from backend.rbac import Principal, split_path
 from hub.drivers.base import utcnow
-from hub.storage.records import AlarmRecord, HistoryPoint, LatestValue
+from hub.storage.records import AlarmRecord, CollectionError, HistoryPoint, LatestValue
 
 router = APIRouter(tags=["data"])
 Reader = Annotated[Principal, Depends(require("data.read"))]
@@ -29,12 +29,16 @@ class TagOut(BaseModel):
     data_type: str
     unit: str | None
     access: str
+    write_class: str | None = None         # read_write tags: setpoint or command
     min: float | None
     max: float | None
     states: dict[int, str] | None = None   # labels of the values of an integer/bool tag
+    protocol: str | None = None            # "calc" for calculated tags
     value: Any = None
-    ts: datetime | None = None
+    ts: datetime | None = None             # source time (or hub time)
+    received_at: datetime | None = None    # when the hub received it
     quality: str | None = None
+    reason: str | None = None              # why the quality is not good
 
 
 class DeviceOut(BaseModel):
@@ -74,9 +78,12 @@ def _tag_out(svc: ServicesDep, path: str) -> TagOut:
     sample = svc.hub.latest.get(path)
     return TagOut(tag=path, name=tag.name, description=tag.description,
                   data_type=str(tag.data_type), unit=tag.unit, access=str(tag.access),
-                  min=tag.min, max=tag.max, states=tag.states,
+                  write_class=tag.write_class and str(tag.write_class),
+                  min=tag.min, max=tag.max, states=tag.states, protocol=device.protocol,
                   value=sample.value if sample else None, ts=sample.timestamp if sample else None,
-                  quality=str(sample.quality) if sample else None)
+                  received_at=sample.received_at if sample else None,
+                  quality=str(sample.quality) if sample else None,
+                  reason=str(sample.reason) if sample and sample.reason else None)
 
 
 def _device_out(svc: ServicesDep, device_id: str, with_tags: bool) -> DeviceOut:
@@ -113,6 +120,17 @@ async def device(device_id: str, svc: ServicesDep, p: Reader) -> DeviceOut:
     return _device_out(svc, device_id, with_tags=True)
 
 
+@router.get("/api/devices/{device_id}/errors", response_model=list[CollectionError])
+async def device_errors(device_id: str, svc: ServicesDep, p: Reader,
+                        limit: Annotated[int, Query(ge=1, le=1000)] = 100
+                        ) -> list[CollectionError]:
+    """Collection problems of the device over time (offline / read errors), newest first."""
+    d = svc.hub.devices.get(device_id)
+    if d is None or not _visible(p, d.site, d.area):
+        raise NotFound("no such device")
+    return await svc.store.collection_errors(device_id, limit)
+
+
 @router.get("/api/tags", response_model=list[TagOut])
 async def tags(svc: ServicesDep, p: Reader, site: str | None = None, area: str | None = None,
                device_id: str | None = None,
@@ -136,7 +154,8 @@ async def tag_latest(tag_path: str, svc: ServicesDep, p: Reader) -> LatestValue:
     sample = svc.hub.latest.get(tag_path)
     if sample is not None:
         return LatestValue(tag_path=tag_path, value=sample.value, ts=sample.timestamp,
-                           quality=sample.quality)
+                           quality=sample.quality, reason=sample.reason,
+                           received_at=sample.received_at)
     stored = await svc.store.latest([tag_path])
     if not stored:
         raise NotFound("no value yet", code="no_value")

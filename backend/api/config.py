@@ -1,6 +1,8 @@
-"""/api/config: devices, alarm rules and control policy, validated and applied live.
+"""/api/config: devices, alarm rules, control policy and the building model, validated and
+applied live, with a history of every change that can be restored.
 
-All routes need ``config.edit`` (engineer, admin). See backend/config_admin.py.
+Routes need ``config.edit`` (engineer, admin); the building model needs ``model.edit``;
+calculated devices also need ``calc.publish``. See backend/config_admin.py.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from backend.rbac import Principal
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 Engineer = Annotated[Principal, Depends(require("config.edit"))]
+ModelEditor = Annotated[Principal, Depends(require("model.edit"))]
 JsonBody = Annotated[dict[str, Any], Body()]
 
 
@@ -114,3 +117,33 @@ async def delete_control_policy(tag_path: str, svc: ServicesDep, p: Engineer
 async def reload(svc: ServicesDep, p: Engineer) -> dict[str, Any]:
     """Re-read config/ after a manual edit and apply it (only changed drivers restart)."""
     return await _admin(svc).reload_from_disk(p)
+
+
+# --- building model (config/building.yaml) ----------------------------------------------------
+
+
+@router.get("/building")
+async def get_building(svc: ServicesDep, _: ModelEditor) -> dict[str, Any]:
+    return _admin(svc).building_data()
+
+
+@router.put("/building")
+async def put_building(body: JsonBody, svc: ServicesDep, p: ModelEditor) -> dict[str, Any]:
+    """Replace the building model; validated against devices and tags like any change."""
+    return await _admin(svc).put_building(p, body)
+
+
+# --- history and restore --------------------------------------------------------------------------
+
+
+@router.get("/history")
+async def history(svc: ServicesDep, _: Engineer) -> list[dict[str, Any]]:
+    """The configuration as it was before each change made through the API, newest first."""
+    return _admin(svc).history()
+
+
+@router.post("/history/{snapshot_id}/restore")
+async def restore(snapshot_id: str, svc: ServicesDep, p: Engineer) -> dict[str, Any]:
+    """Put a snapshot back (validated, applied live, audited; the current state is itself
+    kept as a new snapshot first, so a restore can be undone)."""
+    return await _admin(svc).restore(p, snapshot_id)

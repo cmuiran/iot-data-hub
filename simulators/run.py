@@ -30,6 +30,7 @@ import yaml
 
 from hub.config_loader import (
     ALARMS_FILE,
+    BUILDING_FILE,
     CONTROL_FILE,
     MODBUS_SERVER_FILE,
     NORTHBOUND_FILE,
@@ -109,7 +110,8 @@ async def _main(config_dir: Path, out: Path, modbus_base: int, mqtt_port: int,
     if sim_config.exists():
         shutil.rmtree(sim_config)
     (sim_config / "devices").mkdir(parents=True)
-    for name in (ALARMS_FILE, CONTROL_FILE, NORTHBOUND_FILE, MODBUS_SERVER_FILE):
+    for name in (ALARMS_FILE, CONTROL_FILE, NORTHBOUND_FILE, MODBUS_SERVER_FILE,
+                 BUILDING_FILE):
         if (config_dir / name).exists():
             shutil.copy(config_dir / name, sim_config / name)
 

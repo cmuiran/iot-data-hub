@@ -43,6 +43,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from hub.drivers.base import utcnow
 
 log = logging.getLogger(__name__)
+COLLECTION_ERRORS_DAYS = 90             # history of collection errors
 
 ROLLUP_INTERVAL_S = 300
 RETENTION_INTERVAL_S = 3600
@@ -343,6 +344,9 @@ class Maintenance:
             deleted_raw = await self.store.delete_raw_before(raw_cutoff, timescale)
         deleted_hourly = await self.store.delete_hourly_before(
             now - timedelta(days=self.settings.retention_hourly_days))
+        delete_errors = getattr(self.store, "delete_collection_errors_before", None)
+        if delete_errors is not None:
+            await delete_errors(now - timedelta(days=COLLECTION_ERRORS_DAYS))
         if deleted_raw or deleted_hourly:
             await self.store.add_event("retention", self.node_id,
                                        {"raw_deleted": deleted_raw,

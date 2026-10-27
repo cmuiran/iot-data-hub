@@ -25,7 +25,7 @@ import logging
 import re
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -82,6 +82,8 @@ class AuthService:
         self.counters = {"login_ok": 0, "login_failed": 0, "login_throttled": 0,
                          "mfa_failed": 0}
         self.directory: Directory | None = None
+        # site -> organization (config/building.yaml); set by Services to follow reloads
+        self.site_orgs: Callable[[], Mapping[str, str]] = dict
 
     def use_directory(self, cfg: LdapFile | None) -> None:
         """Turn directory sign-in on (config/ldap.yaml) or off."""
@@ -373,7 +375,7 @@ class AuthService:
             g.role_id in required for g in grants)
         return Principal(user=user, session_id=session_id, grants=grants,
                          role_permissions=await self.store.role_permissions(),
-                         mfa_missing=mfa_missing)
+                         mfa_missing=mfa_missing, site_orgs=self.site_orgs())
 
     # --- MFA enrolment ------------------------------------------------------------------------
 
