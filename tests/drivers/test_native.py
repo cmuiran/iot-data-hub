@@ -102,3 +102,21 @@ async def test_commands_and_acks() -> None:
     d.ack({"command_id": "unknown", "status": "failed"})            # ignored
     with pytest.raises(DriverError, match="no device transport"):
         await driver(Rec()).write_tag("relay", grant)
+
+
+async def test_contact_without_values_keeps_it_online() -> None:
+    rec = Rec()
+    d = driver(rec)
+    await d.start()
+    try:
+        await d.receive({"values": {"power": 1}})
+        for _ in range(10):                         # 2 s, stale_after_s 0.5: only contact
+            await asyncio.sleep(0.2)
+            await d.touch()
+        assert rec.state is DeviceState.ONLINE
+        await asyncio.sleep(2.2)                     # silence: offline
+        assert rec.state is DeviceState.OFFLINE
+        await d.touch()
+        assert rec.state is DeviceState.ONLINE
+    finally:
+        await d.stop()

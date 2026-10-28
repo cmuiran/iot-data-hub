@@ -81,6 +81,7 @@ class Ingest:
                 detail={"transport": transport,
                         "reason": "credential" if not ok else "not running or transport off"})
             raise DeviceAuthError("unknown device or wrong credential")
+        await driver.touch()                      # any signed-in contact keeps it online
         return driver
 
     def driver(self, device_id: str) -> NativeDriver | None:

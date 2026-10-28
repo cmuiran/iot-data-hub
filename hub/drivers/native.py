@@ -45,6 +45,7 @@ class NativeDriver(Driver[NativeDevice]):
         self.channel = channel
         self._last: dict[str, Value] = {}
         self._last_message: float | None = None
+        self._last_touch_seen = 0.0
         self._waiters: dict[str, list[asyncio.Future[Value]]] = {}
         self._pending: dict[str, str] = {}      # command_id -> tag
         self.counters = {"messages": 0, "unknown_keys": 0, "bad_values": 0}
@@ -82,6 +83,15 @@ class NativeDriver(Driver[NativeDevice]):
         await self.mark_seen()
         await self.emit(samples)
         return len(samples)
+
+    async def touch(self) -> None:
+        """The device was in contact (signed in, fetched commands): it is alive, even when it
+        has no new values to send."""
+        now = asyncio.get_running_loop().time()
+        self._last_message = now
+        if self.status.state is not DeviceState.ONLINE or now - self._last_touch_seen > 10:
+            self._last_touch_seen = now           # last_seen stays fresh, at most every 10 s
+            await self.mark_seen()
 
     async def state(self, payload: Any) -> None:
         state = payload.get("state") if isinstance(payload, dict) else payload
