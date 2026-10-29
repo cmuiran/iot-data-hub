@@ -345,6 +345,34 @@ class AccountStore:
                 out[r["device_id"]] = r["level"]
         return out
 
+    async def rooms(self, orgs: set[str], device_ids: list[str]) -> dict[str, str]:
+        """The room each device has in the caller's organizations (the owner's room first)."""
+        async with self._conn() as conn, conn.transaction():
+            await _as_tenant(conn, orgs)
+            rows = await (await conn.execute(
+                "SELECT device_id, room FROM device_access WHERE device_id = ANY(%s) AND "
+                "revoked_at IS NULL AND room IS NOT NULL AND org_id = ANY(app_org_ids()) "
+                "ORDER BY (level = 'owner') DESC", (device_ids,))).fetchall()
+        out: dict[str, str] = {}
+        for r in rows:
+            out.setdefault(r["device_id"], r["room"])
+        return out
+
+    async def set_room(self, orgs: set[str], device_id: str, room: str | None) -> bool:
+        """Put the device in a room of the caller's organizations that have access to it
+        (service write after the RLS check); False if none of them has access."""
+        async with self._conn() as conn, conn.transaction():
+            await _as_tenant(conn, orgs)
+            rows = await (await conn.execute(
+                "SELECT access_id FROM device_access WHERE device_id=%s AND revoked_at IS NULL "
+                "AND org_id = ANY(app_org_ids())", (device_id,))).fetchall()
+            if not rows:
+                return False
+            await conn.execute("RESET ROLE")
+            await conn.execute("UPDATE device_access SET room=%s WHERE access_id = ANY(%s)",
+                               (room, [r["access_id"] for r in rows]))
+        return True
+
     async def owner_org(self, orgs: set[str] | None, device_id: str) -> str | None:
         """The owner organization of the device, if it is one of the caller's (RLS; with
         ``orgs`` None, whoever owns it)."""

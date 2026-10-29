@@ -473,3 +473,103 @@ device's own secure boot), staged rollouts by percentage, the owner postponing a
   organization's real ids, every device route without a credential, forged / expired tokens,
   oversized bodies, injection in search, credential guessing throttled, security headers) in
   addition to `tests/api/test_pentest.py`.
+
+# Maker panel and the completed app
+
+`maker/` — the manufacturer's panel at **/maker** (`HUB_MAKER_DIR`, `off` to disable), built the
+same way as the app (ES modules, no build step, same CSP, fa/en with RTL). Menu: dashboard,
+products, devices & production, labels & QR, warranty, support, settings. Each page uses only
+what the signed-in user's role in the selected manufacturer organization allows
+(`product.manage`, `device.register`, `product.read`, `org.members`).
+
+* **Product**: details and picture; inputs/outputs (the template's tags, group add such as
+  8 relays, a tag editor, the per-protocol address of the selected tag, a preview of the buyer's
+  app); commands (which outputs and parameters are controllable, their class, the native
+  command timeout); protocols (connection defaults and per-tag addresses, forms generated from
+  the hub's own models via `GET /api/platform/protocols`); versions (open a published version,
+  upgrade devices with the breaking-change preview) and firmware (upload with SHA-256, offer,
+  job status, withdraw). Saving goes to the draft and is validated by the server.
+* **Production**: register a range (duplicates checked first) or a CSV, move a whole batch to a
+  stage, the devices by stage, labels: new one-time codes printed as QR labels (the browser's
+  print dialog makes the PDF) or the CSV for the production line, optionally with device
+  credentials. The QR encoder is `maker/js/qr.js` (byte mode, level M, versions 1–10).
+* **Warranty** starts at the buyer's first activation (`platform_devices.activated_at`) and runs
+  `warranty_months`; `warranty_until` is in every device record. **Support** looks a device up
+  and says what its state suggests, with new code / reset / block.
+
+New API (all under `/api/platform`): `PATCH /products/{id}`, `PUT|GET|DELETE
+/products/{id}/image` (PNG/JPEG/WebP ≤ 512 KB), `GET /stats[?product=]`, `GET /protocols`,
+`POST /products/{id}/devices/check`, `POST /products/{id}/devices/lifecycle`,
+`GET /devices?lifecycle=stock&batch=`, `PATCH /devices/{id}` with `warranty_months`; for the
+app `PUT /my/devices/{id}/room` (rooms are per home, on the access row: the maker never sees
+them), `GET /my/devices?org=`, `GET /my/devices/{id}/history?tag=`, `GET /my/summary`,
+`GET /my/notifications`; `GET /catalog` lists each product's protocols. Migration
+`0015_maker_home`.
+
+The app now follows the design: home picker, bell, indoor temperature / energy today / alerts,
+quick scenes, room filter, protocol badges; device page with all on / all off, a 24-hour chart
+and where each command came from (app, automation, scene); device settings (name, room, facts,
+sharing, edge-hub equipment); scenes and automations as two tabs with builders that also edit
+(time / interval / once / value / offline triggers, a time window and a value condition,
+several actions); adding equipment behind an edge hub; notifications. What is still open is
+in `docs/fa/platform/todo-smart-home.md`.
+
+# Second round: homes, groups, energy, offline control, maker extras
+
+Migration `0016_home_maker_plus` (device groups, home settings, SMS settings, tickets and
+messages, branding, plans, invoices; these tables are reached only through the API).
+
+**App** (`backend/api/home.py`): `POST /api/account/homes`, `PATCH /api/account/homes/{org}`,
+`POST /api/account/delete` (password + `"DELETE"`: devices of the personal home released, roles
+and sessions end, name / e-mail / password erased); `GET|PUT
+/api/platform/organizations/{org}/settings` (latitude, longitude, radius, tariff: tiers, peak
+hours and factor, fixed charge, tax); `…/groups` (CRUD; a group view is composed by the app:
+all members' tags together, or one device / one model); `…/my/devices/{id}/timers` (a countdown
+is a `once` automation with `timer: true`, removed after it ran); `GET /api/platform/my/energy`
+(kWh per Tehran day from kWh counters or hourly power averages, the Jalali month's total and
+cost); `GET /api/platform/my/stream` (server-sent events: `samples`, `status` of the caller's
+devices; ends after five minutes so the client reconnects with a fresh token);
+`…/my/devices/{id}/tickets`, `/api/platform/my/tickets[/{id}[/messages]]`;
+`POST …/my/devices/{id}/actions/{key}` (a template command: every parameter checked first,
+then each written through the control-safety layer in order); `…/my/devices/{id}/sms`.
+
+**Automations**: triggers `sun` (`sunrise` / `sunset`, `offset_min`, the home's coordinates,
+weekdays; `hub/sun.py`, NOAA algorithm) and `presence` (`arrive` / `leave`, reported by the app
+with `POST /api/platform/organizations/{org}/presence` while it is open); `local: true`
+automations whose trigger, conditions and writes concern one device only are sent to that
+device as `{"type": "rules", ...}` (MQTT `d/<id>/rules`, TCP, HTTP queue, and
+`GET /ingest/v1/devices/{id}/rules`) and run by the device while it has no contact with the hub.
+
+The rules message carries `server_time` (UTC, outside `version`): a device without NTP sets its
+clock from it, and a device whose clock is not set runs no `time` rule.
+
+**Names and sub-groups**: the owner home names any output or reading of a device and picks its
+icon (`PUT /api/platform/my/devices/{id}/labels/{key}` `{name, icon, favorite}`; table
+`output_labels`, per owner home, never shown to the maker); `/view` returns the home's name as
+`display_name` (the maker's in `default_name`), `icon` and `favorite`. Favourites are the
+one-touch shortcuts on the home screen. A group has `sections`: named parts
+(`{name, icon, outputs: [{device_id, key}]}`, outputs of the group's devices only) with a switch
+for all of their outputs.
+
+**SMS fallback**: the owner stores the device's SIM number; the hub makes a random 32-byte key
+per device and sends `{"type": "config", "sms": {"enabled": true, "key": ..., "device_id": ...}}`
+over the device's own connection. The app keeps the key on the phone and writes, with no
+internet, `HUB <counter> relay_1=1 relay_3=0 <sig>`: `counter` grows with every message (Unix
+seconds), `sig` = first 8 bytes in hex of HMAC-SHA256(key, "<device_id> <counter> <items>").
+The device rejects a wrong signature and a counter not above the last accepted one (no replay,
+no tampering); `PUT .../sms {"new_key": true}` replaces a key after a phone is lost
+(`NativeDeviceSim.sms` and `backend.api.home.sms_signature` are the reference).
+
+**Product templates**: tag kind `calculated` with a `formula` over the product's other keys
+(the hub's formula language: units checked on saving, `integrate(x)`, `runtime(c)`); the hub
+runs one calculation engine for all platform devices (`Hub.platform_calcs`), results are
+stored like any tag. `commands`: several parameters at once (fixed values or entered by the
+buyer).
+
+**Maker** (`backend/api/maker.py`): branding (`…/organizations/{org}/branding[/logo]`; public
+`/api/public/brand/{org}[/logo]` for the app opened with `?brand=<org>`), tickets
+(`/api/platform/tickets[/{id}[/messages]]`, warranty claims approved / rejected), `GET
+/api/platform/trend` (per week: registered, activated, tickets; activated devices offline over
+three days), `GET /api/platform/devices.csv` (no owner data), billing
+(`…/organizations/{org}/billing`; `PUT …/plan` and `POST /api/platform/invoices/{id}/status`
+for platform administrators). Payment itself is outside the platform.

@@ -19,6 +19,8 @@ SOON = datetime.now(UTC) + timedelta(days=1)
 
 
 def test_up_down_up(database_url: str) -> None:
+    rollback(database_url, "0016_home_maker_plus")
+    rollback(database_url, "0015_maker_home")
     rollback(database_url, "0014_versions_firmware")
     rollback(database_url, "0013_automations")
     rollback(database_url, "0012_commands_ingest")
@@ -33,12 +35,16 @@ def test_up_down_up(database_url: str) -> None:
     assert migrate(database_url) == ["0010_accounts_sharing", "0011_claims",
                                      "0012_commands_ingest",
                                      "0013_automations",
-                                     "0014_versions_firmware"]
+                                     "0014_versions_firmware",
+                                     "0015_maker_home",
+                                     "0016_home_maker_plus"]
 
 
 async def test_rollback_refused_with_accounts(store: Any, database_url: str) -> None:
     await store.accounts.create_user(username="user_x", display_name="X", password_hash="h",
                                      email="x@example.com", language="fa", verified_at=None)
+    rollback(database_url, "0016_home_maker_plus")
+    rollback(database_url, "0015_maker_home")
     rollback(database_url, "0014_versions_firmware")
     rollback(database_url, "0013_automations")
     rollback(database_url, "0012_commands_ingest")

@@ -32,7 +32,34 @@
       "production_operator": "اپراتور تولید",
       "manufacturer_support": "پشتیبانی"
     },
-    "levels": {"operator": "کنترل", "viewer": "فقط مشاهده"}
+    "levels": {
+      "operator": "کنترل",
+      "viewer": "فقط مشاهده"
+    },
+    "ticket_new": {
+      "subject": "درخواست تازه: {subject} ({identifier})",
+      "body": "{name} برای دستگاه {identifier} ({product}) یک {kind} فرستاده است:\n\n{text}\n\nپاسخ در پنل سازنده:\n{link}"
+    },
+    "ticket_reply": {
+      "subject": "پاسخ تازهٔ خریدار: {subject} ({identifier})",
+      "body": "{name} به درخواست «{subject}» پاسخ داده است:\n\n{text}\n\n{link}"
+    },
+    "ticket_answer": {
+      "subject": "پاسخ سازنده: {subject}",
+      "body": "سازندهٔ دستگاه {identifier} به درخواست شما پاسخ داد ({status}):\n\n{text}\n\nدیدن و پاسخ در اپ:\n{link}"
+    },
+    "ticket_kinds": {
+      "support": "درخواست پشتیبانی",
+      "warranty": "درخواست گارانتی"
+    },
+    "ticket_statuses": {
+      "answered": "پاسخ داده شد",
+      "in_progress": "در حال بررسی",
+      "approved": "تأیید شد",
+      "rejected": "رد شد",
+      "closed": "بسته شد",
+      "open": "باز"
+    }
   },
   "en": {
     "verify": {
@@ -67,6 +94,33 @@
       "production_operator": "production operator",
       "manufacturer_support": "support"
     },
-    "levels": {"operator": "operate", "viewer": "view only"}
+    "levels": {
+      "operator": "operate",
+      "viewer": "view only"
+    },
+    "ticket_new": {
+      "subject": "New request: {subject} ({identifier})",
+      "body": "{name} sent a {kind} for device {identifier} ({product}):\n\n{text}\n\nAnswer in the maker panel:\n{link}"
+    },
+    "ticket_reply": {
+      "subject": "The buyer replied: {subject} ({identifier})",
+      "body": "{name} replied to “{subject}”:\n\n{text}\n\n{link}"
+    },
+    "ticket_answer": {
+      "subject": "The maker answered: {subject}",
+      "body": "The maker of device {identifier} answered your request ({status}):\n\n{text}\n\nRead and reply in the app:\n{link}"
+    },
+    "ticket_kinds": {
+      "support": "support request",
+      "warranty": "warranty claim"
+    },
+    "ticket_statuses": {
+      "answered": "answered",
+      "in_progress": "in progress",
+      "approved": "approved",
+      "rejected": "rejected",
+      "closed": "closed",
+      "open": "open"
+    }
   }
 }

@@ -172,6 +172,9 @@ class PostgresStore:
         from hub.storage.versions import VersionStore
 
         self.versions = VersionStore(self)       # template upgrades, firmware (0014)
+        from hub.storage.home import HomeStore
+
+        self.home = HomeStore(self)              # groups, tickets, branding, plans (0016)
 
     async def open(self) -> None:
         await self._pool.open(wait=True, timeout=30)

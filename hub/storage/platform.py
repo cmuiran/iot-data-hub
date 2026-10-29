@@ -10,16 +10,17 @@ platform row in the same transaction.
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, computed_field
 
 from hub.models import AnyDeviceModel, TagBase
 from hub.platform.devices import (
@@ -29,12 +30,22 @@ from hub.platform.devices import (
     build_device,
     new_device_id,
 )
-from hub.platform.template import ProductTemplate, build_tags
+from hub.platform.template import ProductTemplate, build_tags, calc_device, calc_rows
 
 log = logging.getLogger(__name__)
 
 TENANT_ROLE = "hub_tenant"
 MAKER_LIFECYCLE = ("registered", "ready", "sold", "disabled")   # "active" comes from a claim
+
+
+def warranty_end(activated_at: datetime | None, months: int | None) -> datetime | None:
+    """When the warranty ends: ``months`` calendar months after the first activation."""
+    if activated_at is None or months is None:
+        return None
+    month = activated_at.month - 1 + months
+    year, month = activated_at.year + month // 12, month % 12 + 1
+    day = min(activated_at.day, calendar.monthrange(year, month)[1])
+    return activated_at.replace(year=year, month=month, day=day)
 
 
 class PlatformError(ValueError):
@@ -78,6 +89,7 @@ class ProductRecord(BaseModel):
     latest_published: int | None = None
     draft: int | None = None
     devices: int = 0
+    has_image: bool = False
 
 
 class VersionRecord(BaseModel):
@@ -112,9 +124,15 @@ class PlatformDeviceRecord(BaseModel):
     parent_device_id: str | None = None      # behind this edge hub
     firmware_version: str | None = None      # as the device last reported it
     firmware_reported_at: datetime | None = None
+    activated_at: datetime | None = None      # first claim by a buyer; the warranty starts
     product_kind: str = "device"
     state: str | None = None
     last_seen: datetime | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def warranty_until(self) -> datetime | None:
+        return warranty_end(self.activated_at, self.warranty_months)
 
 
 # Visible platform rows (row-level security applies in tenant transactions) ...
@@ -122,7 +140,7 @@ _PD_SELECT = (
     "SELECT pd.device_id, pd.identifier, pd.serial_number, pd.product_id, p.code AS "
     "product_code, pd.version, pd.maker_org_id, pd.lifecycle, pd.batch, pd.warranty_months, "
     "pd.options, pd.registered_at, pd.parent_device_id, p.kind AS product_kind, "
-    "pd.firmware_version, pd.firmware_reported_at "
+    "pd.firmware_version, pd.firmware_reported_at, pd.activated_at "
     "FROM platform_devices pd JOIN products p USING (product_id) ")
 # ... and their runtime part, read as the application role for exactly those devices
 # (hub_tenant has no privilege on devices / device_status).
@@ -211,10 +229,98 @@ class PlatformStore:
             raise NotVisible("product")
         return ProductRecord.model_validate(row)
 
+    async def update_product(self, orgs: set[str] | None, product_id: UUID,
+                             changes: dict[str, Any]) -> ProductRecord:
+        """Name, category, description, kind, catalog; the identifier pattern only while the
+        product has no devices (identifiers already printed on labels never change)."""
+        allowed = {"name", "category", "description", "kind", "catalog", "identifier_pattern"}
+        bad = sorted(set(changes) - allowed)
+        if bad:
+            raise PlatformError(f"cannot change {', '.join(bad)}")
+        if not changes:
+            return await self.product(orgs, product_id)
+        current = await self.product(orgs, product_id)
+        pattern = changes.get("identifier_pattern", current.identifier_pattern)
+        if current.devices and pattern != current.identifier_pattern:
+            raise PlatformError("the identifier pattern is fixed once devices are registered",
+                                "conflict")
+        columns = sorted(changes)               # names from the allow-list above
+        assignments = ", ".join(f"{c}=%s" for c in columns)
+        try:
+            async with self._tx(orgs) as conn:
+                row = await (await conn.execute(
+                    f"UPDATE products SET {assignments}, updated_at=now() "  # nosec B608
+                    "WHERE product_id=%s RETURNING product_id",
+                    (*[changes[c] for c in columns], product_id))).fetchone()
+        except psycopg.errors.InsufficientPrivilege:
+            raise NotVisible("product") from None
+        if row is None:
+            raise NotVisible("product")
+        return await self.product(orgs, product_id)
+
+    async def set_image(self, orgs: set[str] | None, product_id: UUID,
+                        image: bytes | None, content_type: str | None) -> None:
+        try:
+            async with self._tx(orgs) as conn:
+                row = await (await conn.execute(
+                    "UPDATE products SET image=%s, image_type=%s, updated_at=now() "
+                    "WHERE product_id=%s RETURNING product_id",
+                    (image, content_type, product_id))).fetchone()
+        except psycopg.errors.InsufficientPrivilege:
+            raise NotVisible("product") from None
+        if row is None:
+            raise NotVisible("product")
+
+    async def image(self, orgs: set[str] | None, product_id: UUID) -> tuple[bytes, str] | None:
+        async with self._tx(orgs) as conn:
+            row = await (await conn.execute(
+                "SELECT image, image_type FROM products WHERE product_id=%s",
+                (product_id,))).fetchone()
+        if row is None:
+            raise NotVisible("product")
+        return (bytes(row["image"]), row["image_type"]) if row["image"] is not None else None
+
+    async def stats(self, orgs: set[str] | None, product_id: UUID | None = None
+                    ) -> dict[str, Any]:
+        """Counts for the maker's dashboard: by lifecycle, online now, firmware versions,
+        warranty (devices whose warranty ends within 30 days)."""
+        where, params = "pd.retired_at IS NULL AND pd.parent_device_id IS NULL", []
+        if product_id is not None:
+            where += " AND pd.product_id = %s"
+            params.append(product_id)
+        async with self._tx(orgs) as conn:
+            rows = await (await conn.execute(
+                "SELECT pd.device_id, pd.lifecycle, pd.firmware_version, pd.activated_at, "
+                "pd.warranty_months FROM platform_devices pd WHERE " + where,  # nosec B608
+                params)).fetchall()
+        ids = [r["device_id"] for r in rows]
+        online: set[str] = set()
+        if ids:
+            async with self._tx(None) as conn:
+                online = {r["device_id"] for r in await (await conn.execute(
+                    "SELECT device_id FROM device_status WHERE device_id = ANY(%s) AND "
+                    "state='online'", (ids,))).fetchall()}
+        by_lifecycle = dict.fromkeys(("registered", "ready", "sold", "active", "disabled"), 0)
+        firmware: dict[str, int] = {}
+        expiring = 0
+        now = datetime.now(UTC)
+        for r in rows:
+            by_lifecycle[r["lifecycle"]] = by_lifecycle.get(r["lifecycle"], 0) + 1
+            if r["firmware_version"]:
+                firmware[r["firmware_version"]] = firmware.get(r["firmware_version"], 0) + 1
+            end = warranty_end(r["activated_at"], r["warranty_months"])
+            if end is not None and now <= end <= now + timedelta(days=30):
+                expiring += 1
+        return {"total": len(rows), "lifecycle": by_lifecycle, "online": len(online),
+                "firmware": firmware, "warranty_expiring": expiring}
+
     @staticmethod
     def _product_sql() -> str:
-        return ("SELECT p.*, (SELECT max(v.version) FROM product_versions v WHERE "
-                "v.product_id = p.product_id AND v.status = 'published') AS latest_published, "
+        return ("SELECT p.product_id, p.org_id, p.code, p.name, p.category, p.description, "
+                "p.image_ref, p.identifier_pattern, p.kind, p.catalog, p.created_at, "
+                "p.updated_at, (p.image IS NOT NULL) AS has_image, "
+                "(SELECT max(v.version) FROM product_versions v WHERE v.product_id = "
+                "p.product_id AND v.status = 'published') AS latest_published, "
                 "(SELECT v.version FROM product_versions v WHERE v.product_id = p.product_id "
                 "AND v.status = 'draft') AS draft, (SELECT count(*) FROM platform_devices d "
                 "WHERE d.product_id = p.product_id) AS devices FROM products p")
@@ -322,7 +428,8 @@ class PlatformStore:
         product = await self.product(orgs, product_id)
         template = await self.template(product_id, version)
         try:
-            tags = build_tags(template, protocol) if protocol in template.bindings else None
+            tags = (build_tags(template, protocol) + calc_rows(template)
+                    if protocol in template.bindings else None)
         except ValueError as exc:
             raise PlatformError(str(exc)) from None
         if tags is None:
@@ -405,14 +512,20 @@ class PlatformStore:
 
     async def devices(self, orgs: set[str] | None, *, product_id: UUID | None = None,
                       lifecycle: str | None = None, search: str | None = None,
-                      limit: int = 100, offset: int = 0) -> tuple[list[PlatformDeviceRecord], int]:
+                      batch: str | None = None, limit: int = 100, offset: int = 0
+                      ) -> tuple[list[PlatformDeviceRecord], int]:
         where, params = ["pd.retired_at IS NULL"], []
         if product_id is not None:
             where.append("pd.product_id = %s")
             params.append(product_id)
-        if lifecycle is not None:
+        if lifecycle == "stock":                 # not with a buyer yet: registered or ready
+            where.append("pd.lifecycle IN ('registered', 'ready')")
+        elif lifecycle is not None:
             where.append("pd.lifecycle = %s")
             params.append(lifecycle)
+        if batch is not None:
+            where.append("pd.batch = %s")
+            params.append(batch)
         if search:
             where.append("(upper(pd.identifier) LIKE %s OR pd.serial_number LIKE %s)")
             like = search.upper().replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
@@ -453,7 +566,7 @@ class PlatformStore:
     async def update_device(self, orgs: set[str] | None, device_id: str, *,
                             name: str | None = None, connection: dict[str, Any] | None = None,
                             options: dict[str, Any] | None = None, enabled: bool | None = None,
-                            lifecycle: str | None = None
+                            lifecycle: str | None = None, warranty_months: int | None = None
                             ) -> tuple[PlatformDeviceRecord, AnyDeviceModel | None]:
         """Change a device (maker only); returns it and its device model when enabled."""
         current = await self.device(orgs, device_id)
@@ -473,8 +586,9 @@ class PlatformStore:
             async with self._tx(orgs) as conn:
                 row = await (await conn.execute(
                     "UPDATE platform_devices SET options=%s, lifecycle=coalesce(%s, lifecycle), "
-                    "updated_at=now() WHERE device_id=%s RETURNING device_id",
-                    (Jsonb(options), lifecycle, device_id))).fetchone()
+                    "warranty_months=coalesce(%s, warranty_months), updated_at=now() "
+                    "WHERE device_id=%s RETURNING device_id",
+                    (Jsonb(options), lifecycle, warranty_months, device_id))).fetchone()
                 if row is None:
                     raise NotVisible("device")
                 await _as_service(conn)
@@ -485,6 +599,43 @@ class PlatformStore:
         except psycopg.errors.InsufficientPrivilege:
             raise NotVisible("device") from None
         return await self.device(orgs, device_id), model
+
+    async def set_lifecycle(self, orgs: set[str] | None, product_id: UUID, lifecycle: str, *,
+                            batch: str | None = None, device_ids: Sequence[str] | None = None
+                            ) -> int:
+        """Move a batch (or these devices) of a product to a maker stage; devices a buyer has
+        activated are left alone (their stage comes from the claim). Returns how many moved."""
+        if lifecycle not in MAKER_LIFECYCLE:
+            raise PlatformError(f"lifecycle {lifecycle} cannot be set here", "invalid_lifecycle")
+        if batch is None and not device_ids:
+            raise PlatformError("give a batch or devices", "invalid")
+        where, params = ["product_id = %s", "lifecycle <> 'active'", "retired_at IS NULL"], \
+            [product_id]
+        if batch is not None:
+            where.append("batch = %s")
+            params.append(batch)
+        if device_ids:
+            where.append("device_id = ANY(%s)")
+            params.append(list(device_ids))
+        try:
+            async with self._tx(orgs) as conn:
+                await self._lock_product(conn, product_id)
+                cur = await conn.execute(
+                    "UPDATE platform_devices SET lifecycle=%s, updated_at=now() WHERE "  # nosec B608
+                    + " AND ".join(where), (lifecycle, *params))
+                return cur.rowcount
+        except psycopg.errors.InsufficientPrivilege:
+            raise NotVisible("product") from None
+
+    async def calc_device(self, device_id: str) -> Any | None:
+        """The device's calculated tags (from its template version) as a hub calc device with
+        the device's own id; None if its template has none (service use)."""
+        found = await self.devices_by_id(None, [device_id])
+        if not found:
+            return None
+        record = found[0]
+        template = await self.template(record.product_id, record.version)
+        return calc_device(template, device_id, record.name)
 
     async def device_models(self, device_ids: Sequence[str] | None = None
                             ) -> list[AnyDeviceModel]:

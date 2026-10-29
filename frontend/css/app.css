@@ -5,6 +5,13 @@
  * abnormal state is visible from across the control room. Logical properties throughout, so the
  * same rules serve Persian (RTL) and English (LTR).
  */
+@font-face {
+  /* Vazirmatn (variable, 100-900), SIL Open Font License 1.1: fonts/OFL.txt. Served by the hub
+     itself, so it works offline and within the CSP (font-src 'self'). */
+  font-family: "Vazirmatn"; src: url("../fonts/Vazirmatn.woff2") format("woff2");
+  font-weight: 100 900; font-style: normal; font-display: swap;
+}
+
 
 :root {
   --bg: #e9edef;

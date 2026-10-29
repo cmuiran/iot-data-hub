@@ -168,7 +168,7 @@ def test_invalid_bindings() -> None:
 
     raw = relay_template()
     raw["bindings"]["modbus_tcp"]["tags"]["extra"] = {"register_type": "coil", "address": 9}
-    with pytest.raises(ValidationError, match="unknown tags extra"):
+    with pytest.raises(ValidationError, match="unknown or calculated tags extra"):
         ProductTemplate.model_validate(raw)
 
     raw = relay_template()

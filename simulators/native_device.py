@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import ssl
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -35,9 +39,93 @@ class NativeDeviceSim:
     executed: list[dict[str, Any]] = field(default_factory=list)
     firmware: str = "1.0.0"
     bad_image: bool = False                 # pretend the download is damaged
+    rules: dict[str, Any] = field(default_factory=dict)    # the last {"type": "rules"} set
+    sms_key: str | None = None              # from {"type": "config", "sms": {...}}
+    sms_counter: int = 0                    # the last accepted message's counter (kept in flash)
+    clock_offset_s: float = 0.0             # hub time - own time, from the rules' server_time
+    local_log: list[dict[str, Any]] = field(default_factory=list)   # rules run while cut off
 
     def telemetry(self) -> dict[str, Any]:
         return {"values": dict(self.values)}
+
+    # --- messages that are not commands --------------------------------------------------------
+
+    def receive(self, message: dict[str, Any]) -> None:
+        """``rules`` (kept, replacing the earlier set; ``server_time`` sets the clock of a
+        device without NTP) and ``config`` (the SMS signing key)."""
+        if message.get("type") == "rules":
+            self.rules = message
+            if message.get("server_time"):
+                hub = datetime.fromisoformat(message["server_time"].replace("Z", "+00:00"))
+                self.clock_offset_s = (hub - datetime.now(UTC)).total_seconds()
+        elif message.get("type") == "config" and isinstance(message.get("sms"), dict):
+            sms = message["sms"]
+            new = sms.get("key") if sms.get("enabled") else None
+            if new != self.sms_key:
+                self.sms_counter = 0         # a new key starts a new count
+            self.sms_key = new
+
+    def sms(self, text: str) -> list[str]:
+        """An SMS command as the app writes it: ``HUB <counter> relay_1=1 relay_3=0 <sig>``;
+        the values are 1/0 for on/off or numbers, the counter grows with every message (the app
+        uses the time in seconds) and ``sig`` is the first 8 bytes, in hex, of
+        HMAC-SHA256(key, "<device_id> <counter> <items...>"). Returns the tags set; a wrong
+        signature, a counter not above the last one (a replayed message) or an unknown tag sets
+        nothing (the device answers nothing to a stranger)."""
+        parts = text.strip().split()
+        if len(parts) < 4 or parts[0].upper() != "HUB" or self.sms_key is None or \
+                not parts[1].isdigit():
+            return []
+        counter, items, sig = int(parts[1]), parts[2:-1], parts[-1].lower()
+        raw = base64.urlsafe_b64decode(self.sms_key + "=" * (-len(self.sms_key) % 4))
+        signed = " ".join([self.device_id, str(counter), *items]).encode()
+        if not hmac.compare_digest(hmac.new(raw, signed, hashlib.sha256).hexdigest()[:16], sig) \
+                or counter <= self.sms_counter:
+            return []
+        changes: dict[str, Any] = {}
+        for item in items:
+            key, _, raw = item.partition("=")
+            if key not in self.values or not raw:
+                return []
+            old = self.values[key]
+            if isinstance(old, bool):
+                changes[key] = raw in ("1", "on", "true")
+            else:
+                try:
+                    changes[key] = float(raw)
+                except ValueError:
+                    return []
+        self.sms_counter = counter
+        self.values.update(changes)
+        return sorted(changes)
+
+    def run_local(self, now_local: Any) -> list[str]:
+        """While cut off from the hub: one pass over the local rules (value triggers on the
+        device's own values, time triggers at their minute). Returns the rule ids that ran."""
+        ran = []
+        ops = {"eq": lambda a, b: a == b, "ne": lambda a, b: a != b, "lt": lambda a, b: a < b,
+               "le": lambda a, b: a <= b, "gt": lambda a, b: a > b, "ge": lambda a, b: a >= b}
+        weekday = (now_local.weekday() + 2) % 7          # 0 = Saturday, as the hub
+        for rule in self.rules.get("rules", []):
+            tr = rule["trigger"]
+            if tr["type"] == "value":
+                value = self.values.get(tr["tag"])
+                fire = value is not None and ops[tr["op"]](value, tr["value"])
+            elif tr["type"] == "time":
+                fire = now_local.strftime("%H:%M") == tr["at"] and \
+                    (tr.get("weekdays") is None or weekday in tr["weekdays"])
+            else:
+                fire = False
+            fire = fire and all(ops[c["op"]](self.values.get(c["tag"]), c["value"])
+                                for c in rule.get("conditions", []))
+            if not fire:
+                continue
+            for action in rule["actions"]:
+                if action["type"] == "write" and self.values.get(action["tag"]) != action["value"]:
+                    self.values[action["tag"]] = action["value"]
+            ran.append(rule["id"])
+            self.local_log.append({"rule": rule["id"], "at": now_local.isoformat()})
+        return ran
 
     def handle(self, command: dict[str, Any]) -> list[dict[str, Any]]:
         """Messages the device sends back for one command (acks, then telemetry)."""
@@ -72,6 +160,9 @@ class NativeDeviceSim:
             for command in r.json() if r.status_code == 200 else []:
                 if command.get("type") == "ota":
                     await self._ota_http(client, headers, base, command)
+                    continue
+                if command.get("type") in ("rules", "config"):
+                    self.receive(command)
                     continue
                 for message in self.handle(command):
                     kind = message.pop("type")
@@ -120,6 +211,8 @@ class NativeDeviceSim:
                 if message.get("type") == "command":
                     for reply in self.handle(message):
                         await send(reply)
+                elif message.get("type") in ("rules", "config"):
+                    self.receive(message)
             return answer
         finally:
             writer.close()
@@ -135,12 +228,16 @@ class NativeDeviceSim:
         base = f"{prefix}d/{self.device_id}"
         async with aiomqtt.Client(host, port, username=self.device_id, password=self.secret,
                                   identifier=f"sim-{self.device_id}") as client:
-            await client.subscribe(f"{base}/cmd", qos=1)
+            for topic in ("cmd", "rules", "config"):
+                await client.subscribe(f"{base}/{topic}", qos=1)
             await client.publish(f"{base}/telemetry", json.dumps(self.telemetry()), qos=1)
             if ready is not None:
                 ready.set()
             async for message in client.messages:
                 command = json.loads(message.payload)
+                if str(message.topic).rsplit("/", 1)[-1] in ("rules", "config"):
+                    self.receive(command)
+                    continue
                 for reply in self.handle(command):
                     kind = reply.pop("type")
                     await client.publish(f"{base}/{kind}", json.dumps(reply), qos=1)

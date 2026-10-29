@@ -145,6 +145,27 @@ class Ingest:
         await self.svc.store.versions.advance_job(UUID(message["job_id"]), device_id, "sent")
         return transport
 
+    async def send_message(self, device_id: str, message: dict[str, Any]) -> str | None:
+        """A non-command message for the device (``type``: ``rules`` = its local automations,
+        ``config`` = settings such as the SMS password): an open TCP session, the platform
+        broker (``d/<id>/<type>``), else the HTTP queue. None if the device is not running."""
+        driver = self.driver(device_id)
+        if driver is None:
+            return None
+        transports = driver.device.connection.transports
+        session = self.tcp.get(device_id)
+        if session is not None and "tcp" in transports:
+            await session(message)
+            return "tcp"
+        if self.mqtt is not None and self.mqtt.connected and "mqtt" in transports:
+            await self.mqtt.publish(f"d/{device_id}/{message['type']}", message)
+            return "mqtt"
+        queue = self.queues.setdefault(device_id, deque(maxlen=MAX_QUEUED))
+        for old in [m for m in queue if m.get("type") == message["type"]]:
+            queue.remove(old)                  # only the newest rules / config matter
+        queue.append(message)
+        return "http"
+
     async def ack(self, driver: NativeDriver, payload: Any, transport: str) -> str:
         """Advance a command from the device's ack; returns the new status (or 'ignored')."""
         if not isinstance(payload, dict):
@@ -201,6 +222,9 @@ class Ingest:
                 out.append(message)
                 await self.svc.store.versions.advance_job(
                     UUID(message["job_id"]), driver.device.device_id, "sent")
+                continue
+            if message.get("type") in ("rules", "config"):
+                out.append(message)
                 continue
             if datetime.fromisoformat(message["expires_at"]) < now:
                 continue

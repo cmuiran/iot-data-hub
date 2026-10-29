@@ -16,6 +16,7 @@ from hub.paths import program_path
 
 BUNDLED_FRONTEND = program_path("frontend")
 BUNDLED_APP = program_path("app")
+BUNDLED_MAKER = program_path("maker")
 
 
 def _frontend_dir(value: str | None) -> Path | None:
@@ -29,6 +30,13 @@ def _app_dir(value: str | None) -> Path | None:
     """HUB_APP_DIR: unset = the bundled consumer app, "off" = not served, else a directory."""
     if value is None or value == "":
         return BUNDLED_APP if (BUNDLED_APP / "index.html").is_file() else None
+    return None if value.strip().lower() == "off" else Path(value)
+
+
+def _maker_dir(value: str | None) -> Path | None:
+    """HUB_MAKER_DIR: unset = the bundled maker panel, "off" = not served, else a directory."""
+    if value is None or value == "":
+        return BUNDLED_MAKER if (BUNDLED_MAKER / "index.html").is_file() else None
     return None if value.strip().lower() == "off" else Path(value)
 
 
@@ -107,6 +115,7 @@ class Settings(BaseModel):
     frontend_dir: Path | None = Field(default_factory=lambda: _frontend_dir(None))
     # consumer app (app/, platform phase 5), served at /app; "off" = not served
     app_dir: Path | None = Field(default_factory=lambda: _app_dir(None))
+    maker_dir: Path | None = Field(default_factory=lambda: _maker_dir(None))
     # operations (phase 4): structured logs, syslog, health checks, restore tests
     log_format: Literal["text", "json"] = "text"
     syslog: str | None = None  # udp://host:514 | tcp://host:601
@@ -290,6 +299,7 @@ class Settings(BaseModel):
             cert_warn_days=int(e.get("HUB_CERT_WARN_DAYS", 30)),
             frontend_dir=_frontend_dir(e.get("HUB_FRONTEND_DIR")),
             app_dir=_app_dir(e.get("HUB_APP_DIR")),
+            maker_dir=_maker_dir(e.get("HUB_MAKER_DIR")),
             log_format=e.get("HUB_LOG_FORMAT", "text"),  # type: ignore[arg-type]
             syslog=e.get("HUB_SYSLOG") or None,
             syslog_facility=e.get("HUB_SYSLOG_FACILITY", "local0"),

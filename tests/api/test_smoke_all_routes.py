@@ -15,7 +15,9 @@ from tests.api.test_platform_pentest import _routes, victim
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 SKIP = {("POST", "/api/auth/logout"), ("POST", "/api/system/backup"),
-        ("POST", "/api/system/restore-test")}          # end the session / slow host jobs
+        ("POST", "/api/system/restore-test"),            # end the session / slow host jobs
+        ("GET", "/api/platform/my/stream"),               # never ends (tested on its own)
+        ("POST", "/api/account/delete")}                  # would delete the test users
 UNKNOWN = {"org_id": "o_unknown", "product_id": "00000000-0000-0000-0000-000000000000",
            "device_id": "dzzzzzzzzzzzzzzzzzzzz", "hub_id": "dzzzzzzzzzzzzzzzzzzzz",
            "child_id": "dzzzzzzzzzzzzzzzzzzzz", "scene_id": 999999, "automation_id": 999999,
@@ -25,7 +27,8 @@ UNKNOWN = {"org_id": "o_unknown", "product_id": "00000000-0000-0000-0000-0000000
            "location_id": "nope", "request_id": "00000000-0000-0000-0000-000000000000",
            "schedule_id": 999999, "session_id": "00000000-0000-0000-0000-000000000000",
            "snapshot_id": "nope", "source": "kish.x.y.z", "tag_path": "kish.x.y.z",
-           "user_id": 999999}
+           "user_id": 999999, "group_id": 999999, "ticket_id": 999999,
+           "invoice_id": 999999, "key": "nope"}
 
 
 @pytest.fixture

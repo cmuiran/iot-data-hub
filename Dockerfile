@@ -27,6 +27,8 @@ COPY hub ./hub
 COPY backend ./backend
 COPY simulators ./simulators
 COPY frontend ./frontend
+COPY app ./app
+COPY maker ./maker
 COPY db ./db
 COPY docs ./docs
 COPY config ./config

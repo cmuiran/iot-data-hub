@@ -23,7 +23,7 @@ from uuid import UUID
 
 from backend.errors import Conflict, Invalid, NotFound
 from backend.rbac import Principal
-from hub.platform.template import ProductTemplate, build_tags, diff_templates
+from hub.platform.template import ProductTemplate, build_tags, calc_rows, diff_templates
 from hub.storage.platform import PlatformError
 
 log = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ class VersionService:
                     failed.append({"device_id": d["device_id"], "error": str(exc)})
                     continue
             await self.store.versions.move(d["device_id"], to_version,
-                                           build_tags(new, d["protocol"]))
+                                           build_tags(new, d["protocol"]) + calc_rows(new))
             if model is not None:
                 await self.svc.hub.apply_platform_device(d["device_id"], model)
             moved.append(d["device_id"])

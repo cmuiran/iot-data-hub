@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import re
 from pathlib import Path
@@ -25,7 +26,9 @@ from backend.api import (
     control,
     dashboards,
     data,
+    home,
     ingest,
+    maker,
     metrics,
     model,
     platform,
@@ -41,6 +44,9 @@ from backend.guards import NetworkAllowlist, RateLimiter
 from backend.services import Services
 
 log = logging.getLogger(__name__)
+
+# the UIs' own font: not in every platform's type table (Windows has none for it)
+mimetypes.add_type("font/woff2", ".woff2")
 
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -239,13 +245,17 @@ def create_app(services: Services) -> FastAPI:
                             status_code=500)
 
     for module in (auth, account, automations, users, data, control, config, model, calc,
-                   platform, ingest, versions, dashboards, reports, schedules, system,
-                   metrics, ws):
+                   platform, home, maker, ingest, versions, dashboards, reports, schedules,
+                   system, metrics, ws):
         app.include_router(module.router)
     if services.settings.app_dir is not None and (services.settings.app_dir / "index.html"
                                                    ).is_file():
         app.mount("/app", _FrontendFiles(directory=services.settings.app_dir, html=True),
                   name="app")                       # the consumer app (before "/")
+    if services.settings.maker_dir is not None and (services.settings.maker_dir / "index.html"
+                                                     ).is_file():
+        app.mount("/maker", _FrontendFiles(directory=services.settings.maker_dir, html=True),
+                  name="maker")                     # the manufacturer panel
     _mount_frontend(app, services.settings.frontend_dir)
     app.add_middleware(ApiVersions)   # /api/v1 is mapped before the guards run
     app.add_middleware(BodyLimit)     # outermost: oversized bodies never reach the app

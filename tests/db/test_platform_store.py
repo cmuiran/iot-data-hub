@@ -272,6 +272,8 @@ async def test_yaml_sync_leaves_platform_alone(store: Any) -> None:
 
 async def test_rollback_refused_with_platform_data(store: Any, database_url: str) -> None:
     await _orgs(store)
+    rollback(database_url, "0016_home_maker_plus")
+    rollback(database_url, "0015_maker_home")
     rollback(database_url, "0014_versions_firmware")
     rollback(database_url, "0013_automations")
     rollback(database_url, "0012_commands_ingest")

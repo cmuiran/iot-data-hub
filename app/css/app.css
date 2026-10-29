@@ -1,4 +1,11 @@
 /* Consumer app: "midnight & champagne". Classes only (the CSP forbids inline styles). */
+@font-face {
+  /* Vazirmatn (variable, 100-900), SIL Open Font License 1.1: fonts/OFL.txt. Served by the hub
+     itself, so it works offline and within the CSP (font-src 'self'). */
+  font-family: "Vazirmatn"; src: url("../fonts/Vazirmatn.woff2") format("woff2");
+  font-weight: 100 900; font-style: normal; font-display: swap;
+}
+
 :root {
   --bg: #0B0D12; --bg-2: #0E1117; --surface: rgba(255,255,255,0.05);
   --surface-2: rgba(255,255,255,0.08); --line: rgba(255,255,255,0.08);
@@ -106,10 +113,10 @@ svg.i.lg { width: 26px; height: 26px; }
           display: flex; align-items: center; justify-content: flex-end; cursor: pointer; }
 .switch .track { width: 42px; height: 24px; border-radius: 12px; background: var(--line-2);
                  position: relative; transition: background .2s; }
-.switch .knob { position: absolute; top: 3px; inset-inline-end: 3px; width: 18px; height: 18px;
+.switch .knob { position: absolute; top: 3px; inset-inline-end: 21px; width: 18px; height: 18px;
                 border-radius: 9px; background: var(--text); transition: inset-inline-end .2s; }
 .switch.on .track { background: var(--accent); }
-.switch.on .knob { inset-inline-end: 21px; background: var(--accent-ink); }
+.switch.on .knob { inset-inline-end: 3px; background: var(--accent-ink); }
 .empty { padding: 34px 18px; text-align: center; display: flex; flex-direction: column;
          gap: 12px; align-items: center; }
 
@@ -170,4 +177,302 @@ svg.i.lg { width: 26px; height: 26px; }
 .toast.ok { border-color: var(--ok); }
 .offline { margin: 0 20px; }
 
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* --- the design mockup: home, device, scenes, add device --------------------------------- */
+:root[data-accent="teal"] { --accent: #7FD1C7; --accent-soft: rgba(127,209,199,0.13); --accent-line: rgba(127,209,199,0.45); }
+:root[data-accent="violet"] { --accent: #A99BFF; --accent-soft: rgba(169,155,255,0.14); --accent-line: rgba(169,155,255,0.45); }
+:root[data-accent="coral"] { --accent: #FF9F7A; --accent-soft: rgba(255,159,122,0.13); --accent-line: rgba(255,159,122,0.45); }
+.stack.tight { gap: 3px; }
+.top { align-items: flex-start; }
+.end { justify-content: flex-end; }
+.strong { font-weight: 700; }
+.lh { line-height: 1.8; }
+.accent-text { color: var(--accent); }
+.warn-text { color: var(--warn); }
+.sub { color: var(--muted); }
+.top-bar .h2 { font-size: 17px; }
+.small-h1 { font-size: 20px; }
+.avatar { width: 44px; height: 44px; border-radius: 22px; background: linear-gradient(135deg, #3A3F4B, #22262E);
+          display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px;
+          color: var(--accent); text-decoration: none; flex: none; }
+:root[data-theme="light"] .avatar { background: linear-gradient(135deg, #E9E4DA, #D8D1C4); }
+.avatar.lg { width: 56px; height: 56px; border-radius: 28px; font-size: 20px; }
+.home-pick { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-size: 22px;
+             font-weight: 700; min-height: 32px; }
+.home-pick svg.i { width: 18px; height: 18px; color: var(--muted); }
+.home-pick:focus-visible { outline: 2px solid var(--accent-line); border-radius: 8px; }
+.bell { position: relative; }
+.bell.dot-on::after { content: ""; position: absolute; top: 10px; inset-inline-end: 11px; width: 8px; height: 8px;
+                      border-radius: 4px; background: var(--warn); }
+.stat .label { color: var(--muted); }
+.stat .unit { font-size: 11px; font-weight: 400; color: var(--muted); }
+.stat.warn { background: var(--warn-soft); border-color: rgba(255,138,92,0.35); }
+.stat.warn .label, .stat.warn .unit { color: var(--warn); }
+.scene-row { display: flex; gap: 10px; }
+.scene-btn { flex: 1 1 0; min-width: 0; height: 52px; border-radius: 18px; border: 1px solid var(--line);
+             background: var(--surface); font-size: 13px; font-weight: 500; display: flex; align-items: center;
+             justify-content: center; gap: 8px; cursor: pointer; overflow: hidden; white-space: nowrap; }
+.tone-violet svg.i { color: var(--violet); }
+.tone-ok svg.i { color: var(--ok); }
+.tone-accent svg.i { color: var(--accent); }
+.tone-warn svg.i { color: var(--warn); }
+.dev .proto { align-self: flex-start; font-size: 10px; letter-spacing: 0.3px; padding: 2px 8px; border-radius: 8px;
+              background: var(--surface-2); color: var(--muted); }
+.big-card { padding: 18px; border-radius: 28px; gap: 16px; }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.out span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; }
+.tight-card { gap: 8px; }
+.big-value { font-size: 20px; }
+svg.spark { width: 100%; height: 64px; display: block; }
+svg.spark .area { fill: var(--accent); fill-opacity: 0.12; }
+svg.spark .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round;
+                  vector-effect: non-scaling-stroke; }
+select.plain { background: transparent; border: 0; font-size: 14px; font-weight: 500; padding: 4px 0; cursor: pointer; }
+select.plain option { background: var(--bg-2); color: var(--text); }
+.pic { width: 56px; height: 56px; border-radius: 18px; background: var(--surface-2); display: inline-flex;
+       align-items: center; justify-content: center; overflow: hidden; flex: none; color: var(--muted); }
+.pic img { width: 100%; height: 100%; object-fit: cover; }
+.link-card { text-decoration: none; color: var(--text); gap: 12px; }
+.link-card .ico { width: 42px; height: 42px; flex: none; border-radius: 14px; background: var(--surface-2);
+                  display: flex; align-items: center; justify-content: center; }
+.link-card .ok-ico { background: var(--ok-soft); color: var(--ok); }
+.plain-link { text-decoration: none; color: inherit; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; }
+.divider span { flex: 1 1 0; height: 1px; background: var(--line); }
+.scan { width: 100%; aspect-ratio: auto; height: 290px; border-radius: 32px; cursor: pointer; padding: 0; color: inherit; }
+.scan::before { content: ""; position: absolute; width: 220px; height: 220px; border-radius: 50%;
+                background: var(--accent); opacity: 0.10; filter: blur(50px); }
+.scan video { position: absolute; inset: 0; }
+svg.frame-svg { width: 190px; height: 190px; position: relative; }
+svg.frame-svg .corners { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; }
+svg.frame-svg .laser { fill: none; stroke: var(--accent); stroke-width: 2; stroke-opacity: 0.7; }
+svg.frame-svg .dots { fill: none; stroke: #3A3F4B; stroke-width: 10; stroke-linecap: square; }
+.code-input { letter-spacing: 1px; text-align: left; }
+.code-input.wide { letter-spacing: 2px; }
+.seg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 4px; border-radius: 18px;
+       background: var(--surface); border: 1px solid var(--line); }
+.seg a { height: 40px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+         color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+.seg a.on { background: var(--text); color: var(--bg); font-weight: 700; }
+.scene-wrap { position: relative; }
+.scene-card { width: 100%; height: 112px; border-radius: 24px; padding: 16px; display: flex; flex-direction: column;
+              justify-content: space-between; align-items: flex-start; cursor: pointer; text-align: start;
+              border: 1px solid var(--accent-line); background: var(--accent-soft); }
+.scene-card.tone-violet { border-color: rgba(169,155,255,0.35); background: var(--violet-soft); }
+.scene-card.tone-ok { border-color: rgba(127,209,199,0.35); background: var(--ok-soft); }
+.scene-card.tone-warn { border-color: rgba(255,159,122,0.35); background: var(--warn-soft); }
+.scene-card .name { font-size: 15px; font-weight: 700; }
+.edit-btn { position: absolute; top: 10px; inset-inline-end: 10px; width: 36px; height: 36px; }
+.accent-btn { background: var(--accent); color: var(--accent-ink); border: 0; }
+.auto-card { border-radius: 22px; padding: 14px 16px; }
+.chip.violet { background: var(--violet-soft); color: var(--violet); }
+:root:not([data-theme="light"]) .chip.violet { color: #D3CCFF; }
+.icon-pick { width: 44px; height: 44px; border-radius: 14px; border: 1px solid var(--line-2);
+             background: var(--surface); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.icon-pick.on { border-color: var(--accent); background: var(--accent-soft); }
+.section-label { font-size: 13px; font-weight: 700; color: var(--muted); }
+details.more { border: 1px solid var(--line); border-radius: 16px; padding: 10px 14px; }
+details.more summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 28px; }
+details.more[open] summary { margin-bottom: 10px; }
+.action { gap: 8px; }
+dialog.sheet { border: 1px solid var(--line-2); border-radius: 26px; background: var(--bg-2); color: var(--text);
+               padding: 18px; width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 32px); }
+dialog.sheet::backdrop { background: rgba(0,0,0,0.55); }
+.reading.pick { width: 100%; border: 1px solid transparent; cursor: pointer; text-align: start; }
+.reading.pick.on { border-color: var(--accent-line); }
+.swatch { width: 32px; height: 32px; border-radius: 16px; border: 2px solid transparent; cursor: pointer; }
+.swatch.on { border-color: var(--text); }
+.sw-gold { background: #E8B86A; } .sw-teal { background: #7FD1C7; }
+.sw-violet { background: #A99BFF; } .sw-coral { background: #FF9F7A; }
+
+/* --- second round: groups, energy, tickets, SMS, timers ------------------------------------ */
+.group-row { display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+.group-row:empty { display: none; }
+.group-card { flex: none; min-width: 148px; min-height: 64px; padding: 10px 12px; border-radius: 20px;
+              background: var(--surface); border: 1px solid var(--line); display: flex; align-items: center;
+              gap: 10px; text-decoration: none; color: var(--text); cursor: pointer; text-align: start; }
+.group-card .ico { width: 38px; height: 38px; border-radius: 12px; background: var(--accent-soft);
+                   color: var(--accent); display: flex; align-items: center; justify-content: center; flex: none; }
+.group-card .name { font-size: 13px; font-weight: 700; }
+.group-card.add { border-style: dashed; }
+.group-card.add .ico { background: var(--surface-2); color: var(--muted); }
+.check-row { display: flex; align-items: center; gap: 10px; cursor: pointer; min-height: 44px; }
+.check-row input { width: 20px; height: 20px; accent-color: var(--accent); }
+.out .dev-label { font-size: 9px; opacity: 0.8; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; padding: 0 4px; }
+.out:disabled { opacity: 0.45; cursor: default; }
+.warn-card { border-color: rgba(255,138,92,0.35); background: var(--warn-soft); }
+.warn-card .ico { background: transparent; color: var(--warn); }
+svg.bars { width: 100%; height: 120px; display: block; }
+svg.bars rect { fill: var(--accent); fill-opacity: 0.85; }
+.stat.dim b { color: var(--muted); }
+.tier { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.cond { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.bubble { padding: 10px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line);
+          display: flex; flex-direction: column; gap: 4px; max-width: 88%; }
+.bubble.buyer { align-self: flex-start; }
+.bubble.maker { align-self: flex-end; background: var(--accent-soft); border-color: var(--accent-line); }
+textarea.input.area { height: auto; min-height: 90px; padding: 12px 16px; line-height: 1.8; resize: vertical; }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sms-text { font-size: 15px; letter-spacing: 0.5px; text-align: left; overflow-wrap: anywhere; }
+.sm-input { height: 40px; width: auto; min-width: 120px; padding: 0 10px; font-size: 13px; }
+.btn.disabled { opacity: 0.45; pointer-events: none; }
+a.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; color: inherit; }
+a.btn.primary { color: var(--accent-ink); }
+.plan-btn { position: absolute; top: 10px; inset-inline-end: 52px; width: 36px; height: 36px; }
+.brand-logo { width: 64px; height: 64px; border-radius: 20px; object-fit: contain; background: var(--surface-2); }
+.end-text { align-items: flex-end; text-align: end; }
+.danger-link { color: var(--warn); align-self: center; }
+
+/* --- dark controls everywhere: the browser's own lists (select, date, time) follow the theme */
+:root { color-scheme: dark; }
+select.input { appearance: none; cursor: pointer; padding-inline-end: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23A3A8B5' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-size: 16px 16px; background-repeat: no-repeat; background-position: left 12px center; }
+[dir="ltr"] select.input { background-position: right 12px center; }
+select.input.sm-input { padding-inline-start: 12px; padding-inline-end: 34px; }
+select.input:focus { border-color: var(--accent-line); }
+select option, select optgroup { background: #151922; color: var(--text); }
+select option:checked { background: var(--accent-soft); color: var(--accent); }
+input[type="time"], input[type="date"], input[type="number"] { color-scheme: dark; }
+
+/* --- naming outputs, icons, favourites, parts of a group, the SMS button ----------------------- */
+.out { position: relative; }
+.out .out-name { max-width: 100%; padding: 0 4px; text-align: center; line-height: 1.35;
+  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.out .fav-mark { position: absolute; top: 7px; inset-inline-start: 8px; color: var(--accent); }
+.out.on .fav-mark { color: var(--accent-ink); }
+.out .fav-mark svg.i, .out .edit-mark svg.i { width: 12px; height: 12px; }
+.out .edit-mark { position: absolute; top: 7px; inset-inline-end: 8px; }
+.out.editing { border-style: dashed; border-color: var(--accent-line); animation: wobble 2.6s ease-in-out infinite; }
+.out.editing:nth-child(2n) { animation-delay: -1.3s; }
+@keyframes wobble { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-1.2deg); } 75% { transform: rotate(1.2deg); } }
+.icon-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+@media (min-width: 560px) { .icon-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+.icon-pick { height: 48px; border-radius: 16px; border: 1px solid var(--line-2); background: var(--surface);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--muted);
+  transition: transform .2s var(--spring), background-color .25s, color .25s, border-color .25s; }
+.icon-pick.on { background: var(--accent); color: var(--accent-ink); border-color: transparent;
+  box-shadow: 0 6px 18px var(--accent-glow); transform: scale(1.06); }
+.fav-row { display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none; padding: 2px 0 6px; }
+.fav { flex: none; display: flex; align-items: center; gap: 10px; min-width: 150px; min-height: 60px;
+  padding: 10px 14px 10px 12px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface);
+  cursor: pointer; text-align: start; transition: transform .18s var(--ease), background-color .3s, border-color .3s, box-shadow .3s; }
+.fav .ico { width: 38px; height: 38px; border-radius: 13px; background: var(--surface-2); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; transition: background-color .3s, color .3s, transform .3s var(--spring); }
+.fav .name { font-size: 13px; font-weight: 700; }
+.fav.on { background: var(--accent-soft); border-color: var(--accent-line); box-shadow: 0 8px 22px rgba(0,0,0,0.3); }
+.fav.on .ico { background: var(--accent); color: var(--accent-ink); box-shadow: 0 0 16px var(--accent-glow); }
+.fav:active:not(:disabled) { transform: scale(.96); }
+.fav.changed .ico { animation: pop .5s var(--spring); }
+.fav.busy { animation: halo 1.4s var(--ease) infinite; }
+.fav:disabled { opacity: .5; }
+.section-card { gap: 14px; transition: border-color .35s var(--ease), box-shadow .35s var(--ease), background-color .35s; }
+.section-card.lit { border-color: var(--accent-line); background: linear-gradient(160deg, var(--accent-soft), var(--surface) 60%);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.3); }
+.section-card.changed { animation: halo 1.2s var(--ease); }
+.section-head { display: flex; align-items: center; gap: 12px; background: none; border: 0; padding: 0;
+  cursor: pointer; text-align: start; min-height: 44px; }
+.section-head .ico { width: 44px; height: 44px; border-radius: 15px; background: var(--surface-2); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; transition: background-color .3s, color .3s; }
+.section-card.lit .section-head .ico { background: var(--accent); color: var(--accent-ink); box-shadow: 0 0 18px var(--accent-glow); }
+.section-head .name { font-size: 15px; font-weight: 700; }
+.dashed-btn { border-style: dashed; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.sms-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; }
+.sms-btn.urgent { border-color: var(--accent-line); color: var(--accent); animation: halo 2.4s var(--ease) infinite; }
+.chip svg.i { width: 14px; height: 14px; }
+button.chip { border: 0; cursor: pointer; min-height: 32px; }
+
+/* --- motion: quiet, precise, never bouncy for its own sake ------------------------------------
+   One easing family; things answer a touch at once (press), settle softly (release) and glow
+   when they are on. All of it is switched off for "reduce motion". */
+:root { --ease: cubic-bezier(.2, .8, .2, 1); --spring: cubic-bezier(.34, 1.56, .64, 1);
+        --accent-glow: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes changed { 0% { color: var(--accent); text-shadow: 0 0 14px var(--accent-glow); }
+                     100% { color: inherit; text-shadow: none; } }
+@keyframes halo { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+                  50% { box-shadow: 0 0 0 6px transparent; } }
+@keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.14); } 100% { transform: scale(1); } }
+@keyframes sheen { from { transform: translateX(-120%) skewX(-18deg); } to { transform: translateX(220%) skewX(-18deg); } }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-12px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes drift { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(24px, 18px) scale(1.08); } }
+
+/* pages and cards come in once, the tiles one after another */
+.enter > .page > *, .enter > div > .card, .enter .grid > *, .enter .stats > * { animation: rise .55s var(--ease) both; }
+.enter .grid > :nth-child(2), .enter .stats > :nth-child(2), .enter > .page > :nth-child(2) { animation-delay: .05s; }
+.enter .grid > :nth-child(3), .enter .stats > :nth-child(3), .enter > .page > :nth-child(3) { animation-delay: .1s; }
+.enter .grid > :nth-child(4), .enter > .page > :nth-child(4) { animation-delay: .15s; }
+.enter .grid > :nth-child(5), .enter > .page > :nth-child(5) { animation-delay: .2s; }
+.enter .grid > :nth-child(n+6), .enter > .page > :nth-child(n+6) { animation-delay: .25s; }
+.glow { animation: drift 18s ease-in-out infinite; }
+dialog.sheet[open] { animation: rise .35s var(--ease); }
+dialog.sheet::backdrop { animation: fade .3s ease; }
+.toast { animation: toast-in .4s var(--spring); }
+
+/* everything you can press answers at once */
+.btn, .icon-btn, .tab, .chip, .link, .dev, .out, .stat, .reading.pick, .nav a, .card.link-card, a.card {
+  transition: transform .18s var(--ease), background-color .25s var(--ease), border-color .25s var(--ease),
+              box-shadow .3s var(--ease), color .2s var(--ease), opacity .2s; }
+.btn:active:not(:disabled), .icon-btn:active, .tab:active, .out:active, .reading.pick:active,
+.card.link-card:active, a.card:active { transform: scale(.97); }
+.dev:active { transform: scale(.985); }
+@media (hover: hover) {
+  .btn:hover:not(:disabled) { border-color: var(--accent-line); }
+  .icon-btn:hover, .tab:not(.on):hover { border-color: var(--accent-line); color: var(--text); }
+  .dev:hover { transform: translateY(-2px); border-color: var(--line-2); box-shadow: var(--shadow); }
+  .dev.on:hover { box-shadow: 0 14px 34px rgba(0,0,0,0.4), 0 0 0 1px var(--accent-line); }
+  .out:not(.on):hover { border-color: var(--accent-line); color: var(--text); }
+  .card.link-card:hover, a.card:hover { border-color: var(--line-2); transform: translateY(-1px); }
+  .nav a:not(.fab):hover { color: var(--text); }
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.input { transition: border-color .2s var(--ease), box-shadow .25s var(--ease); }
+.input:focus { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+/* the primary button: a slow light across the champagne */
+.btn.primary { position: relative; overflow: hidden;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 18%, transparent); }
+.btn.primary::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  transform: translateX(-120%) skewX(-18deg); }
+@media (hover: hover) { .btn.primary:hover:not(:disabled)::after { animation: sheen .9s var(--ease); }
+  .btn.primary:hover:not(:disabled) { box-shadow: 0 10px 26px var(--accent-glow); } }
+
+/* the switch: the knob springs over, stretches while held, the track glows when on */
+.switch .track { transition: background-color .3s var(--ease), box-shadow .3s var(--ease); }
+.switch .knob { transition: inset-inline-end .38s var(--spring), width .18s var(--ease), background-color .3s;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+.switch:active .knob { width: 23px; }
+.switch.on .track { box-shadow: 0 0 0 4px var(--accent-soft), 0 0 16px var(--accent-glow); }
+.switch:disabled { cursor: progress; }
+.switch:disabled .knob { opacity: .7; }
+
+/* tiles and outputs that are on glow; their icon breathes once when it changes */
+.dev .ico, .out svg.i { transition: background-color .3s var(--ease), color .3s var(--ease), transform .3s var(--spring); }
+.dev.on .ico { box-shadow: 0 0 18px var(--accent-glow); }
+.dev.changed .ico, .out.changed svg.i { animation: pop .5s var(--spring); }
+.dev.on.changed { animation: halo 1.2s var(--ease); }
+.out.on { box-shadow: 0 8px 24px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.35); }
+.out.on svg.i { transform: scale(1.08); }
+.out.busy, .dev.busy { animation: halo 1.4s var(--ease) infinite; opacity: .85; }
+.changed-text, .reading b.changed, .stat b.changed, .state.changed { animation: changed 1.4s var(--ease); }
+
+/* the live dot, the bottom bar and the add button */
+.chip.ok .dot { animation: halo 2.4s var(--ease) infinite; }
+.nav a.on svg.i { animation: pop .45s var(--spring); }
+.nav a.fab { transition: transform .25s var(--spring), box-shadow .3s; }
+.nav a.fab:active { transform: scale(.92) rotate(90deg); }
+@media (hover: hover) { .nav a.fab:hover { box-shadow: 0 10px 30px var(--accent-glow); transform: translateY(-2px); } }
+
+/* waiting: a soft shimmer instead of a bare word */
+.loading { color: transparent; border-radius: 16px; min-height: 64px;
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 400% 100%; animation: shimmer 1.6s linear infinite; }
+.flash { animation: changed 1.2s var(--ease); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

@@ -88,8 +88,8 @@ class ClaimStore:
                 "INSERT INTO device_access (device_id, org_id, level, granted_by) "
                 "SELECT unnest(%s::text[]), %s, 'owner', %s", (ids, org_id, user_id))
             await conn.execute(
-                "UPDATE platform_devices SET lifecycle='active', updated_at=now() "
-                "WHERE device_id = ANY(%s)", (ids,))
+                "UPDATE platform_devices SET lifecycle='active', updated_at=now(), "
+                "activated_at=coalesce(activated_at, %s) WHERE device_id = ANY(%s)", (now, ids))
         return True
 
     async def release(self, device_id: str, lifecycle: str, now: datetime) -> list[str]:

@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from hub.alarms import AlarmEngine, AlarmRaise
-from hub.calc.engine import CalcEngine
+from hub.calc.engine import CalcEngine, compile_calcs
 from hub.config_loader import ConfigReport
 from hub.drivers import Driver, DriverError, create_driver
 from hub.drivers.base import AnyDevice, Clock, DeviceState, DeviceStatus, utcnow
@@ -149,6 +149,9 @@ class Hub:
     def __post_init__(self) -> None:
         # platform devices come from the database (hub.storage.platform), not from the report
         self.platform_devices: dict[str, AnyDevice] = {}
+        # calculated tags of platform devices (product template formulas), one engine for all
+        self.platform_calcs: dict[str, CalcDevice] = {}
+        self.platform_calc: CalcEngine | None = None
         self.devices: dict[str, AnyDevice] = {d.device.device_id: d.device
                                                for d in self.report.devices}
         self.tags: dict[str, tuple[AnyDevice, TagBase]] = self.report.tags_by_path()
@@ -191,12 +194,17 @@ class Hub:
         await asyncio.gather(*(d.start() for d in self.drivers.values()))
         if self.calc is not None:
             await self.calc.start()
+        if self.platform_calc is not None:
+            await self._seed_calc(self.platform_calc)
+            await self.platform_calc.start()
         log.info("hub started: %d devices, %d tags", len(self.devices), len(self.tags))
 
     async def stop(self) -> None:
         self._running = False
         if self.calc is not None:
             await self.calc.stop()
+        if self.platform_calc is not None:
+            await self.platform_calc.stop()
         await asyncio.gather(*(d.stop() for d in self.drivers.values()), return_exceptions=True)
         self._wake.set()
         for task in self._tasks:
@@ -287,7 +295,42 @@ class Hub:
         for device in self.platform_devices.values():
             for tag in device.tags:
                 tags[device.tag_path(tag.name)] = (device, tag)
+        for calc in self.platform_calcs.values():
+            for tag in calc.tags:
+                tags[calc.tag_path(tag.name)] = (calc, tag)
         return tags
+
+    async def _calc_of(self, device_id: str) -> CalcDevice | None:
+        platform = getattr(self.store, "platform", None)
+        if platform is None or not hasattr(platform, "calc_device"):
+            return None
+        try:
+            return await platform.calc_device(device_id)
+        except Exception:  # noqa: BLE001 - a broken formula must not stop the device
+            log.exception("calculated tags of %s not loaded", device_id)
+            return None
+
+    async def _rebuild_platform_calc(self) -> None:
+        """One engine for every platform device's calculated tags, rebuilt when a device
+        changes; running totals (integrate) of unchanged definitions are kept."""
+        old = self.platform_calc
+        catalogue = {path: tag for path, (_, tag) in self.tags.items()}
+        defs, order, issues = compile_calcs(list(self.platform_calcs.values()), catalogue)
+        for issue in issues:
+            if issue.error:
+                log.error("platform calculated tag %s %s: %s", issue.source, issue.location,
+                          issue.message)
+        new = CalcEngine(defs, order, self._on_samples, self.clock) if defs else None
+        if old is not None:
+            await old.stop()
+        if new is not None:
+            if old is not None:
+                new.adopt(old)
+            else:
+                await self._seed_calc(new)
+            if self._running:
+                await new.start()
+        self.platform_calc = new
 
     async def _load_platform_devices(self) -> None:
         platform = getattr(self.store, "platform", None)
@@ -300,7 +343,13 @@ class Hub:
             return
         self.platform_devices = {d.device_id: d for d in models}
         self.devices |= self.platform_devices
+        for device_id in self.platform_devices:
+            calc = await self._calc_of(device_id)
+            if calc is not None:
+                self.platform_calcs[device_id] = calc
         self.tags = self._all_tags()
+        if self.platform_calcs:
+            await self._rebuild_platform_calc()
         for device_id in self.platform_devices:
             self.statuses[device_id] = DeviceStatus(device_id)
 
@@ -315,6 +364,7 @@ class Hub:
         driver = self.drivers.pop(device_id, None)
         if driver is not None:
             await driver.stop()
+        had_calc = self.platform_calcs.pop(device_id, None) is not None
         if device is None:
             self.platform_devices.pop(device_id, None)
             self.devices.pop(device_id, None)
@@ -327,6 +377,9 @@ class Hub:
             self.platform_devices[device_id] = device
             self.devices[device_id] = device
             self.statuses[device_id] = DeviceStatus(device_id)
+            calc = await self._calc_of(device_id)
+            if calc is not None:
+                self.platform_calcs[device_id] = calc
             self.tags = self._all_tags()
             for path in [p for p in self.latest if p not in self.tags]:
                 del self.latest[path]
@@ -335,6 +388,8 @@ class Hub:
                 self.drivers[device_id] = new
                 await new.start()
             outcome = "restarted" if old is not None else "added"
+        if had_calc or device_id in self.platform_calcs:
+            await self._rebuild_platform_calc()
         refresh = getattr(self.store, "refresh_device_tags", None)   # the sample writer's ids
         if refresh is not None:
             await refresh(device_id)
@@ -441,6 +496,8 @@ class Hub:
             log.exception("alarm evaluation failed")
         if self.calc is not None:
             self.calc.feed(samples)
+        if self.platform_calc is not None:
+            self.platform_calc.feed(samples)
 
     async def _on_status(self, status: DeviceStatus) -> None:
         old = self.statuses.get(status.device_id)

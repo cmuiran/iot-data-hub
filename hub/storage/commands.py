@@ -33,6 +33,7 @@ class CommandRecord(BaseModel):
     finished_at: datetime | None = None
     expires_at: datetime
     error: str | None = None
+    reason: str | None = None        # of the write: "app", "automation:<id> <name>", ...
 
 
 class CommandStore:
@@ -89,8 +90,9 @@ class CommandStore:
     async def for_device(self, device_id: str, limit: int = 100) -> list[CommandRecord]:
         async with self._conn() as conn:
             rows = await (await conn.execute(
-                "SELECT * FROM commands WHERE device_id=%s ORDER BY created_at DESC LIMIT %s",
-                (device_id, limit))).fetchall()
+                "SELECT c.*, w.reason FROM commands c LEFT JOIN write_audit w ON "
+                "w.request_id = c.command_id AND w.phase = 'requested' WHERE c.device_id=%s "
+                "ORDER BY c.created_at DESC LIMIT %s", (device_id, limit))).fetchall()
         return [CommandRecord.model_validate(r) for r in rows]
 
     async def expire(self, now: datetime) -> int:

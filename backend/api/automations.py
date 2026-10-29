@@ -9,7 +9,7 @@ tag's type and range (checked again by the control-safety layer at run time).
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from backend.automations import (
     TIME_TRIGGERS,
     AutomationIn,
+    OfflineTrigger,
     SceneAction,
     SceneIn,
     ValueTrigger,
@@ -94,7 +95,7 @@ async def _check_automation(svc: ServicesDep, org_id: str, spec: AutomationIn) -
     reads = [(c.device_id, c.tag) for c in spec.conditions]
     if isinstance(spec.trigger, ValueTrigger):
         reads.append((spec.trigger.device_id, spec.trigger.tag))
-    elif not isinstance(spec.trigger, TIME_TRIGGERS):        # offline: the device only
+    elif isinstance(spec.trigger, OfflineTrigger):           # offline: the device only
         levels = await svc.store.accounts.access_levels({org_id}, [spec.trigger.device_id])
         if spec.trigger.device_id not in levels:
             raise Invalid(f"device {spec.trigger.device_id} is not one of this "
@@ -209,7 +210,15 @@ async def _save(svc: ServicesDep, p: Principal, org_id: str, automation_id: int 
                                    detail={"org_id": org_id,
                                            "automation_id": record.automation_id,
                                            "trigger": body.trigger.type})
+    await _push(svc, org_id)
     return await _out(svc, record)
+
+
+async def _push(svc: ServicesDep, org_id: str) -> None:
+    """The home's devices get their local rules again (the automations changed)."""
+    from backend.api.home import push_local_rules
+
+    await push_local_rules(svc, org_id)
 
 
 @router.post("/organizations/{org_id}/automations", status_code=201)
@@ -233,6 +242,7 @@ async def delete_automation(org_id: str, automation_id: int, svc: ServicesDep, p
     await svc.store.add_auth_audit("automation_deleted", p.username, user_id=p.user_id,
                                    client_addr=client_addr(request),
                                    detail={"org_id": org_id, "automation_id": automation_id})
+    await _push(svc, org_id)
 
 
 async def _record(svc: ServicesDep, p: Principal, org_id: str, automation_id: int,
@@ -337,3 +347,16 @@ async def calendar(svc: ServicesDep, p: Signed,
                        weekday_name=jalali.WEEKDAYS_FA[jalali.weekday(d)],
                        month_name=jalali.MONTHS_FA[jm - 1], holiday=jalali.fixed_holiday(d))
 
+
+
+class PresenceIn(BaseModel):
+    event: Literal["arrive", "leave"]
+
+
+@router.post("/organizations/{org_id}/presence")
+async def presence(org_id: str, body: PresenceIn, svc: ServicesDep, p: Viewer) -> dict[str, Any]:
+    """The app reports that its user arrived home or left (its place against the home's,
+    while the app is open): the home's presence automations run."""
+    _orgs(p, "device.view", org_id)
+    launched = await svc.automations.presence(org_id, body.event, p.user_id or 0)
+    return {"event": body.event, "automations": launched}

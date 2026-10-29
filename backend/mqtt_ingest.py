@@ -130,10 +130,11 @@ class MqttIngest:
 
 
 def acl_allows(device_id: str, topic: str, action: str, prefix: str = "") -> bool:
-    """A device may publish its telemetry / state / ack and subscribe to its commands only."""
+    """A device may publish its telemetry / state / ack and subscribe to its commands, firmware
+    offers, local rules and settings only."""
     own = f"{prefix}d/{device_id}/"
     if action == "publish":
         return topic in (own + "telemetry", own + "state", own + "ack", own + "ota/status")
     if action == "subscribe":
-        return topic in (own + "cmd", own + "ota")
+        return topic in (own + "cmd", own + "ota", own + "rules", own + "config")
     return False

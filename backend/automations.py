@@ -50,6 +50,7 @@ from hub import jalali
 from hub.drivers.base import DeviceState, utcnow
 from hub.models import Quality, Segment
 from hub.platform.devices import platform_tag_path
+from hub.sun import sun_times
 
 log = logging.getLogger(__name__)
 TICK_S = 5.0
@@ -140,9 +141,27 @@ class OfflineTrigger(_M):
     for_s: int = Field(default=60, ge=10, le=86_400)
 
 
-Trigger = Annotated[TimeTrigger | IntervalTrigger | OnceTrigger | ValueTrigger | OfflineTrigger,
-                    Field(discriminator="type")]
-TIME_TRIGGERS = (TimeTrigger, IntervalTrigger, OnceTrigger)
+class SunTrigger(Calendar):
+    """Sunrise or sunset at the home's place (the app fills in the coordinates), with an
+    offset: -30 = half an hour before."""
+
+    type: Literal["sun"]
+    event: Literal["sunrise", "sunset"]
+    offset_min: int = Field(default=0, ge=-180, le=180)
+    latitude: float = Field(ge=-66, le=66)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class PresenceTrigger(_M):
+    """Someone of the home arrives or leaves (reported by the app: POST .../presence)."""
+
+    type: Literal["presence"]
+    event: Literal["arrive", "leave"]
+
+
+Trigger = Annotated[TimeTrigger | IntervalTrigger | OnceTrigger | ValueTrigger | OfflineTrigger
+                    | SunTrigger | PresenceTrigger, Field(discriminator="type")]
+TIME_TRIGGERS = (TimeTrigger, IntervalTrigger, OnceTrigger, SunTrigger)
 
 
 class Condition(_M):
@@ -194,6 +213,10 @@ class AutomationIn(_M):
     respect_manual_min: int = Field(default=60, ge=0, le=1440)
     missed: Literal["skip", "catch_up"] = "skip"
     catch_up_min: int = Field(default=30, ge=1, le=1440)
+    local: bool = Field(default=False, description="also run on the device itself while it "
+                        "has no connection to the hub (only rules about that one device)")
+    timer: bool = Field(default=False, description="a countdown of the app: a once trigger, "
+                        "removed after it ran")
 
     def definition(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude={"name", "enabled"})
@@ -254,6 +277,11 @@ def _day_times(trigger: Any, day: date, tz: ZoneInfo, holidays: set[date]) -> li
         return []
     if isinstance(trigger, TimeTrigger):
         return [datetime.combine(day, _hhmm(trigger.at), tz)]
+    if isinstance(trigger, SunTrigger):
+        rise, set_ = sun_times(day, trigger.latitude, trigger.longitude)
+        at = rise if trigger.event == "sunrise" else set_
+        return [] if at is None else [(at + timedelta(minutes=trigger.offset_min)).replace(
+            second=0, microsecond=0)]
     times = []
     minute = 0
     while minute < 1440:
@@ -314,7 +342,24 @@ class AutomationEngine:
                 await self.tick()
             except Exception:  # noqa: BLE001 - one bad automation must not stop the others
                 log.exception("automation tick failed")
+            try:
+                await self.monthly()
+            except Exception:  # noqa: BLE001 - billing must never stop the automations
+                log.exception("monthly invoices failed")
             await asyncio.sleep(TICK_S)
+
+    async def monthly(self) -> None:
+        """Once per hour: the makers' invoices of the month that just ended (backend.api.maker)."""
+        now = self.clock()
+        hour = now.strftime("%Y%m%d%H")
+        if getattr(self, "_billed_hour", None) == hour:
+            return
+        self._billed_hour = hour
+        from backend.api.maker import close_month
+
+        made = await close_month(self.svc, now)
+        if made:
+            log.info("issued %d monthly invoices", made)
 
     async def holidays(self, org_id: str, start: date, end: date) -> set[date]:
         return {h.day for h in await self.store.holidays(None, org_id, start, end)}
@@ -330,6 +375,8 @@ class AutomationEngine:
                 log.error("automation %s has an invalid definition", record.automation_id)
                 continue
             trigger = spec.trigger
+            if isinstance(trigger, PresenceTrigger):
+                continue                       # fired by presence() when the app reports
             if isinstance(trigger, TIME_TRIGGERS):
                 await self._time(record, spec, now)
             else:
@@ -393,6 +440,22 @@ class AutomationEngine:
         except TypeError:
             return False
 
+    async def presence(self, org_id: str, event: str, who: int) -> int:
+        """Someone of the home arrived or left: run the home's presence automations."""
+        now = self.clock()
+        launched = 0
+        for record in await self.store.automations(None, org_id):
+            if not record.enabled or record.automation_id in self._running:
+                continue
+            try:
+                spec = AutomationIn.from_record(record)
+            except ValueError:
+                continue
+            if isinstance(spec.trigger, PresenceTrigger) and spec.trigger.event == event:
+                self.launch(record, spec, f"presence:{event}:{who}:{now.isoformat()}")
+                launched += 1
+        return launched
+
     def launch(self, record: Any, spec: AutomationIn, key: str) -> None:
         task = asyncio.create_task(self.run(record, spec, key), name=f"automation:{key}")
         self._running[record.automation_id] = task
@@ -449,6 +512,8 @@ class AutomationEngine:
                           "partial" if good else "failed") if results else "ok"
         if run_id is not None:
             await self.store.finish_run(run_id, status, detail)
+            if spec.timer and status != "skipped":     # a countdown is done once it ran
+                await self.store.delete_automation(None, record.org_id, record.automation_id)
             self.svc.hub.bus.publish({"type": "automation", "automation_id":
                                       record.automation_id, "status": status})
             log.log(logging.INFO if status in ("ok", "skipped") else logging.WARNING,

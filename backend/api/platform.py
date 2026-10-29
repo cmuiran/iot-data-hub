@@ -9,8 +9,11 @@ organization's product or device answers like an unknown one (404).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from functools import cache
 from typing import Annotated, Any, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -125,6 +128,109 @@ async def get_product(product_id: UUID, svc: ServicesDep, p: Reader) -> ProductR
         return await svc.store.platform.product(_orgs(p, "product.read"), product_id)
     except PlatformError as exc:
         raise _api_error(exc) from None
+
+
+class ProductPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    category: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=2000)
+    kind: Literal["device", "edge_hub"] | None = None
+    catalog: bool | None = None
+    identifier_pattern: str | None = Field(default=None, min_length=3, max_length=64)
+
+
+@router.patch("/products/{product_id}")
+async def update_product(product_id: UUID, body: ProductPatch, svc: ServicesDep, p: Manager,
+                         request: Request) -> ProductRecord:
+    """The product's details (the code never changes; the identifier pattern only until the
+    first device is registered). Empty category / description clear them."""
+    changes = body.model_dump(exclude_unset=True)
+    for key in ("name", "kind", "catalog", "identifier_pattern"):
+        if key in changes and changes[key] is None:
+            del changes[key]
+    for key in ("category", "description"):
+        if key in changes:
+            changes[key] = (changes[key] or "").strip() or None
+    if "identifier_pattern" in changes:
+        try:                              # the same rule as on creation
+            ProductIn.model_validate({"code": "X0", "name": "x",
+                                      "identifier_pattern": changes["identifier_pattern"]})
+        except ValidationError as exc:
+            raise Invalid(exc.errors()[0]["msg"], code="invalid_pattern") from None
+    try:
+        record = await svc.store.platform.update_product(_orgs(p, "product.manage"),
+                                                         product_id, changes)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+    await svc.store.add_auth_audit("product_saved", p.username, user_id=p.user_id,
+                                   client_addr=client_addr(request),
+                                   detail={"product_id": str(product_id),
+                                           "changed": sorted(changes)})
+    return record
+
+
+IMAGE_MAGIC = {"image/png": b"\x89PNG", "image/jpeg": b"\xff\xd8\xff", "image/webp": b"RIFF"}
+MAX_IMAGE = 512 * 1024
+
+
+@router.put("/products/{product_id}/image", status_code=204)
+async def put_product_image(product_id: UUID, request: Request, svc: ServicesDep,
+                            p: Manager) -> None:
+    """The product picture: the raw PNG / JPEG / WebP bytes (at most 512 KB) as the body."""
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+    body = await request.body()
+    magic = IMAGE_MAGIC.get(content_type)
+    webp_ok = content_type != "image/webp" or body[8:12] == b"WEBP"
+    if magic is None or not body.startswith(magic) or not webp_ok:
+        raise Invalid("send a PNG, JPEG or WebP image", code="invalid_image")
+    if len(body) > MAX_IMAGE:
+        raise Invalid("the image is larger than 512 KB", code="image_too_large")
+    try:
+        await svc.store.platform.set_image(_orgs(p, "product.manage"), product_id, body,
+                                           content_type)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+
+
+@router.delete("/products/{product_id}/image", status_code=204)
+async def delete_product_image(product_id: UUID, svc: ServicesDep, p: Manager) -> None:
+    try:
+        await svc.store.platform.set_image(_orgs(p, "product.manage"), product_id, None, None)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+
+
+@router.get("/products/{product_id}/image")
+async def get_product_image(product_id: UUID, svc: ServicesDep, p: Signed) -> Response:
+    """The picture, for the maker and for whoever has a device of the product (RLS)."""
+    orgs = p.orgs_with("product.read")
+    if orgs is not None:
+        orgs = orgs | (p.orgs_with("device.view") or set())
+        orgs |= {m.org_id for m in await svc.accounts.memberships(p)}
+    try:
+        found = await svc.store.platform.image(orgs if orgs is None or orgs else {"-"},
+                                               product_id)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+    if found is None:
+        raise NotFound("the product has no picture", code="no_image")
+    data, content_type = found
+    return Response(data, media_type=content_type,
+                    headers={"Cache-Control": "private, max-age=300"})
+
+
+@router.get("/stats")
+async def stats(svc: ServicesDep, p: Reader, product: UUID | None = None) -> dict[str, Any]:
+    """The maker's dashboard: devices by lifecycle, online now, firmware versions, warranty."""
+    return await svc.store.platform.stats(_orgs(p, "product.read"), product)
+
+
+@router.get("/protocols")
+async def protocols(p: Signed) -> dict[str, Any]:
+    """Per protocol, the fields a binding gives: connection defaults and per-tag addresses
+    (from the protocol's own models, so the forms of the maker panel and of the app follow
+    the hub's validation). The same for everyone: no data of any organization."""
+    return _protocol_fields()
 
 
 # --- template versions ------------------------------------------------------------------------
@@ -280,24 +386,76 @@ async def register_devices(product_id: UUID, body: RegisterIn, svc: ServicesDep,
                        devices=records[:100])
 
 
+class RangeIn(BaseModel):
+    start: int = Field(ge=0)
+    count: int = Field(ge=1, le=MAX_BATCH)
+
+
+@router.post("/products/{product_id}/devices/check")
+async def check_range(product_id: UUID, body: RangeIn, svc: ServicesDep, p: Registrar
+                      ) -> dict[str, Any]:
+    """Before registering a range: its first and last identifier, and the ones already taken
+    (by any product: identifiers are unique on the platform)."""
+    try:
+        product = await svc.store.platform.product(_orgs(p, "device.register"), product_id)
+        ids = identifiers(product.identifier_pattern, body.start, body.count)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+    except ValueError as exc:
+        raise Invalid(str(exc), code="invalid_identifier") from None
+    try:
+        await svc.store.platform._check_free(ids, product_id, [])
+    except PlatformError as exc:
+        return {"first": ids[0], "last": ids[-1], "count": len(ids),
+                "taken": exc.extra.get("values", [])}
+    return {"first": ids[0], "last": ids[-1], "count": len(ids), "taken": []}
+
+
 class DevicePage(BaseModel):
     total: int
     devices: list[PlatformDeviceRecord]
 
 
-Lifecycle = Literal["registered", "ready", "sold", "active", "disabled"]
+Lifecycle = Literal["registered", "ready", "sold", "active", "disabled", "stock"]
 
 
 @router.get("/devices")
 async def list_devices(svc: ServicesDep, p: Reader, product: UUID | None = None,
                        lifecycle: Lifecycle | None = None,
                        q: Annotated[str | None, Query(max_length=64)] = None,
+                       batch: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
                        limit: Annotated[int, Query(ge=1, le=500)] = 100,
                        offset: Annotated[int, Query(ge=0)] = 0) -> DevicePage:
+    """``lifecycle=stock``: not with a buyer yet (registered or ready)."""
     rows, total = await svc.store.platform.devices(
         _orgs(p, "product.read"), product_id=product, lifecycle=lifecycle, search=q,
-        limit=limit, offset=offset)
+        batch=batch, limit=limit, offset=offset)
     return DevicePage(total=total, devices=rows)
+
+
+class StageIn(BaseModel):
+    lifecycle: Literal["registered", "ready", "sold", "disabled"]
+    batch: str | None = Field(default=None, min_length=1, max_length=64)
+    device_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_BATCH)
+
+
+@router.post("/products/{product_id}/devices/lifecycle")
+async def set_stage(product_id: UUID, body: StageIn, svc: ServicesDep, p: Registrar,
+                    request: Request) -> dict[str, Any]:
+    """Move a whole batch (or a list) to a stage, e.g. a shipped batch to "sold"; devices a
+    buyer activated keep their stage."""
+    try:
+        moved = await svc.store.platform.set_lifecycle(
+            _orgs(p, "device.register"), product_id, body.lifecycle, batch=body.batch,
+            device_ids=body.device_ids)
+    except PlatformError as exc:
+        raise _api_error(exc) from None
+    await svc.store.add_auth_audit(
+        "platform_device_updated", p.username, user_id=p.user_id,
+        client_addr=client_addr(request),
+        detail={"product_id": str(product_id), "lifecycle": body.lifecycle,
+                "batch": body.batch, "devices": moved})
+    return {"moved": moved}
 
 
 @router.get("/devices/{device_id}")
@@ -314,6 +472,7 @@ class DevicePatch(BaseModel):
     options: dict[str, Any] | None = None
     enabled: bool | None = None
     lifecycle: Literal["registered", "ready", "sold", "disabled"] | None = None
+    warranty_months: int | None = Field(default=None, ge=0, le=240)
 
 
 @router.patch("/devices/{device_id}")
@@ -382,22 +541,54 @@ async def revoke_invitation(org_id: str, invitation_id: int, svc: ServicesDep, p
 
 class MyDevice(PlatformDeviceRecord):
     access: str | None = None            # owner / operator / viewer (best of the caller's orgs)
+    room: str | None = None              # the room the caller's home put it in
+    product_name: str | None = None
+    product_has_image: bool = False
 
 
-@router.get("/my/devices")
-async def my_devices(svc: ServicesDep, p: Viewer,
-                     limit: Annotated[int, Query(ge=1, le=500)] = 200,
-                     offset: Annotated[int, Query(ge=0)] = 0) -> list[MyDevice]:
-    """Devices the caller's organizations own or received (device.view)."""
+async def _my_orgs(svc: ServicesDep, p: Principal, org: str | None = None) -> set[str]:
     orgs = _orgs(p, "device.view")
     if orgs is None:                     # platform administrators use /devices
         orgs = {m.org_id for m in await svc.accounts.memberships(p)}
+    if org is not None:
+        orgs = orgs & {org}
+    return orgs
+
+
+async def _mine(svc: ServicesDep, orgs: set[str], rows: list[PlatformDeviceRecord]
+                ) -> list[MyDevice]:
+    ids = [r.device_id for r in rows]
+    levels = await svc.store.accounts.access_levels(orgs, ids)
+    rooms = await svc.store.accounts.rooms(orgs, ids)
+    products = {pr.product_id: pr for pr in await svc.store.platform.products(orgs)}
+    out = []
+    for r in rows:
+        if r.device_id not in levels:     # a maker's own stock is not "mine"
+            continue
+        product = products.get(r.product_id)
+        live = svc.hub.drivers.get(r.device_id)    # the running driver knows better than the
+        state = str(live.status.state) if live is not None else r.state     # stored status
+        out.append(MyDevice.model_validate(r.model_dump() | {"state": state} | {
+            "access": levels[r.device_id], "room": rooms.get(r.device_id),
+            "product_name": product.name if product else None,
+            "product_has_image": bool(product and product.has_image)}))
+    return out
+
+
+OrgQuery = Annotated[str | None, Query(pattern=f"^{SEGMENT_PATTERN}$")]
+
+
+@router.get("/my/devices")
+async def my_devices(svc: ServicesDep, p: Viewer, org: OrgQuery = None,
+                     limit: Annotated[int, Query(ge=1, le=500)] = 200,
+                     offset: Annotated[int, Query(ge=0)] = 0) -> list[MyDevice]:
+    """Devices the caller's organizations own or received (device.view); ``org`` limits it
+    to one home."""
+    orgs = await _my_orgs(svc, p, org)
     if not orgs:
         return []
     rows, _ = await svc.store.platform.devices(orgs, limit=limit, offset=offset)
-    levels = await svc.store.accounts.access_levels(orgs, [r.device_id for r in rows])
-    return [MyDevice.model_validate(r.model_dump() | {"access": levels[r.device_id]})
-            for r in rows if r.device_id in levels]   # a maker's own stock is not "mine"
+    return await _mine(svc, orgs, rows)
 
 
 class ShareIn(BaseModel):
@@ -466,11 +657,20 @@ async def claim(body: ClaimIn, svc: ServicesDep, p: Signed, request: Request
                                   body.name, client_addr(request))
 
 
+class CatalogProduct(ProductRecord):
+    protocols: list[str] = []          # of the latest published version
+
+
 @router.get("/catalog")
-async def catalog(svc: ServicesDep, p: Signed) -> list[ProductRecord]:
-    """Products any owner may add behind an edge hub."""
-    return [r for r in await svc.store.platform.products(None)
-            if r.catalog and r.latest_published is not None]
+async def catalog(svc: ServicesDep, p: Signed) -> list[CatalogProduct]:
+    """Products any owner may add behind an edge hub, with the protocols they speak."""
+    out = []
+    for r in await svc.store.platform.products(None):
+        if r.catalog and r.latest_published is not None:
+            template = await svc.store.platform.template(r.product_id, r.latest_published)
+            out.append(CatalogProduct.model_validate(r.model_dump() | {
+                "protocols": sorted(template.bindings)}))
+    return out
 
 
 class OwnerPatch(BaseModel):
@@ -485,6 +685,20 @@ async def configure_my_device(device_id: str, body: OwnerPatch, svc: ServicesDep
                               request: Request) -> PlatformDeviceRecord:
     return await svc.claims.configure(p, device_id, body.model_dump(exclude_none=True),
                                       client_addr(request))
+
+
+class RoomIn(BaseModel):
+    room: str | None = Field(default=None, max_length=40)
+
+
+@router.put("/my/devices/{device_id}/room")
+async def set_room(device_id: str, body: RoomIn, svc: ServicesDep, p: Viewer) -> dict[str, Any]:
+    """The room of the device in the caller's homes (each home has its own rooms); an empty
+    room takes it out of every room."""
+    room = (body.room or "").strip() or None
+    if not await svc.store.accounts.set_room(await _my_orgs(svc, p), device_id, room):
+        raise NotFound("device not found")
+    return {"device_id": device_id, "room": room}
 
 
 @router.delete("/my/devices/{device_id}", status_code=204)
@@ -537,6 +751,151 @@ async def my_device_commands(device_id: str, svc: ServicesDep, p: Viewer,
     return await svc.store.commands.for_device(device_id, limit)
 
 
+class Point(BaseModel):
+    ts: datetime
+    value: float | None = None
+
+
+@router.get("/my/devices/{device_id}/history")
+async def my_device_history(device_id: str, svc: ServicesDep, p: Viewer,
+                            tag: Annotated[str, Query(pattern=f"^{SEGMENT_PATTERN}$")],
+                            hours: Annotated[int, Query(ge=1, le=24 * 31)] = 24,
+                            points: Annotated[int, Query(ge=10, le=500)] = 96) -> list[Point]:
+    """A tag's values over the last hours, for the app's chart (only tags the template shows
+    on a chart)."""
+    if await _my_level(svc, p, device_id, "device.view") is None:
+        raise NotFound("device not found")
+    record = await svc.store.platform.device(None, device_id)
+    template = await svc.store.platform.template(record.product_id, record.version)
+    if not any(t.key == tag and t.ui.visible and t.ui.chart for t in template.tags):
+        raise NotFound("no chart for this tag", code="no_chart")
+    end = datetime.now(UTC)
+    rows = await svc.store.history(f"platform.devices.{device_id}.{tag}",
+                                   end - timedelta(hours=hours), end, max_points=points)
+    return [Point(ts=r.ts, value=_number(r.avg if r.avg is not None else r.value))
+            for r in rows]
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    return float(value) if isinstance(value, int | float) else None
+
+
+TEHRAN = ZoneInfo("Asia/Tehran")
+TEMPERATURE_UNITS = ("°C", "C", "degC")
+
+
+@router.get("/my/summary")
+async def my_summary(svc: ServicesDep, p: Viewer, org: OrgQuery = None) -> dict[str, Any]:
+    """The home screen's tiles, from the devices' own tags: indoor temperature (average of
+    the temperature readings), power now and energy since midnight (Tehran time, from kWh
+    counters or else the power readings), alerts (offline devices, bad values)."""
+    orgs = await _my_orgs(svc, p, org)
+    out: dict[str, Any] = {"devices": 0, "online": 0, "temperature": None, "power_kw": None,
+                           "energy_kwh": None, "alerts": 0}
+    if not orgs:
+        return out
+    rows, _ = await svc.store.platform.devices(orgs, limit=200)
+    mine = await _mine(svc, orgs, rows)
+    temps: list[float] = []
+    power = energy = 0.0
+    have_power = have_energy = False
+    alerts = 0
+    now = datetime.now(UTC)
+    midnight = now.astimezone(TEHRAN).replace(hour=0, minute=0, second=0, microsecond=0)
+    for d in mine:
+        if d.state != "online":
+            alerts += 1
+            continue
+        template = await svc.store.platform.template(d.product_id, d.version)
+        counter = any((x.unit or "") == "kWh" for x in template.tags)
+        for t in template.tags:
+            path = f"platform.devices.{d.device_id}.{t.key}"
+            sample = svc.hub.latest.get(path)
+            if sample is None:
+                continue
+            if str(sample.quality) == "bad":
+                alerts += 1
+                continue
+            value = _number(sample.value) if not isinstance(sample.value, bool) else None
+            unit = (t.unit or "").strip()
+            if value is None:
+                continue
+            if unit in TEMPERATURE_UNITS:
+                temps.append(value)
+            elif unit in ("kW", "W"):
+                power += value / (1000 if unit == "W" else 1)
+                have_power = True
+                if not counter:
+                    energy += await _energy(svc, path, midnight, now, unit)
+                    have_energy = True
+            elif unit == "kWh":
+                first = next((v for x in await svc.store.history(path, midnight, now, 2)
+                              if (v := _number(x.value if x.avg is None else x.min))
+                              is not None), None)
+                if first is not None:
+                    energy += max(value - first, 0.0)
+                    have_energy = True
+    out.update(devices=len(mine), online=sum(d.state == "online" for d in mine),
+               temperature=round(sum(temps) / len(temps), 1) if temps else None,
+               power_kw=round(power, 3) if have_power else None,
+               energy_kwh=round(energy, 2) if have_energy else None, alerts=alerts)
+    return out
+
+
+async def _energy(svc: ServicesDep, path: str, start: datetime, end: datetime,
+                  unit: str) -> float:
+    """kWh from power readings (trapezoids over the stored history; gaps over an hour are
+    not counted)."""
+    kwh, last = 0.0, None
+    for r in await svc.store.history(path, start, end, max_points=288):
+        value = _number(r.avg if r.avg is not None else r.value)
+        if value is None:
+            continue
+        kw = value / (1000 if unit == "W" else 1)
+        if last is not None:
+            hours = (r.ts - last[0]).total_seconds() / 3600
+            if 0 < hours <= 1:
+                kwh += (kw + last[1]) / 2 * hours
+        last = (r.ts, kw)
+    return kwh
+
+
+@router.get("/my/notifications")
+async def my_notifications(svc: ServicesDep, p: Viewer, org: OrgQuery = None
+                           ) -> list[dict[str, Any]]:
+    """What the bell shows, newest first: devices offline, commands that failed or got no
+    answer, automation runs that failed (the last 48 hours)."""
+    orgs = await _my_orgs(svc, p, org)
+    if not orgs:
+        return []
+    rows, _ = await svc.store.platform.devices(orgs, limit=200)
+    since = datetime.now(UTC) - timedelta(hours=48)
+    out: list[dict[str, Any]] = []
+    for d in await _mine(svc, orgs, rows):
+        if d.state != "online" and d.enabled:
+            out.append({"kind": "offline", "device_id": d.device_id, "device": d.name,
+                        "at": d.last_seen or d.registered_at})
+        for c in await svc.store.commands.for_device(d.device_id, 20):
+            if c.created_at < since:
+                break
+            if c.status in ("failed", "expired"):
+                out.append({"kind": f"command_{c.status}", "device_id": d.device_id,
+                            "device": d.name, "tag": c.tag_path.rsplit(".", 1)[-1],
+                            "value": c.value, "at": c.finished_at or c.created_at})
+    viewable = p.orgs_with("device.view")
+    for org_id in sorted(orgs if viewable is None else orgs & viewable):
+        for a in await svc.store.automations.automations(orgs, org_id):
+            for run in await svc.store.automations.runs(orgs, a.automation_id, 5):
+                if run.started_at >= since and run.status in ("failed", "partial"):
+                    out.append({"kind": f"automation_{run.status}",
+                                "automation_id": a.automation_id, "automation": a.name,
+                                "at": run.finished_at or run.started_at})
+    out.sort(key=lambda n: n["at"], reverse=True)
+    return out[:50]
+
+
 # --- the consumer app's device view (platform phase 5) -----------------------------------------
 
 
@@ -554,12 +913,23 @@ class TagView(BaseModel):
     value: Any = None
     ts: Any = None
     quality: str | None = None
+    default_name: dict[str, str] | None = None   # the maker's, when the home renamed it
+    icon: str | None = None                      # the home's choice
+    favorite: bool = False
+
+
+class CommandView(BaseModel):
+    key: str
+    display_name: dict[str, str]
+    icon: str | None = None
+    params: list[dict[str, Any]]          # tag, value (None: the user enters it)
 
 
 class DeviceView(BaseModel):
     device: MyDevice
     product: str
     tags: list[TagView]
+    commands: list[CommandView] = []      # several parameters at once (if the caller operates)
 
 
 async def _my_level(svc: ServicesDep, p: Principal, device_id: str, permission: str
@@ -584,17 +954,89 @@ async def my_device_view(device_id: str, svc: ServicesDep, p: Viewer) -> DeviceV
     template = await svc.store.platform.template(record.product_id, record.version)
     operate = level in ("owner", "operator") and \
         await _my_level(svc, p, device_id, "device.operate") in ("owner", "operator")
+    owner = await svc.store.accounts.owner_org(None, device_id)
+    labels = await svc.store.home.labels([owner], [device_id]) if owner else {}
     tags = []
     for t in sorted(template.tags, key=lambda t: (t.ui.order, t.key)):
         if not t.ui.visible:
             continue
         sample = svc.hub.latest.get(f"platform.devices.{device_id}.{t.key}")
+        label = labels.get((device_id, t.key))
+        names = dict(t.display_name)
         tags.append(TagView(
-            key=t.key, kind=str(t.kind), display_name=dict(t.display_name),
+            key=t.key, kind=str(t.kind),
+            display_name={"fa": label.name, "en": label.name} if label and label.name else names,
+            default_name=names if label and label.name else None,
+            icon=label.icon if label else None, favorite=bool(label and label.favorite),
             data_type=str(t.data_type), unit=t.unit, min=t.min, max=t.max, states=t.states,
             writable=operate and str(t.access) == "read_write",
             ui=t.ui.model_dump(exclude_none=True),
             value=sample.value if sample else None, ts=sample.timestamp if sample else None,
             quality=str(sample.quality) if sample else None))
-    return DeviceView(device=MyDevice.model_validate(record.model_dump() | {"access": level}),
-                      product=product.name, tags=tags)
+    rooms = await svc.store.accounts.rooms(await _my_orgs(svc, p), [device_id])
+    live = svc.hub.drivers.get(device_id)
+    return DeviceView(device=MyDevice.model_validate(record.model_dump() | {
+        "state": str(live.status.state) if live is not None else record.state,
+        "access": level, "room": rooms.get(device_id), "product_name": product.name,
+        "product_has_image": product.has_image}), product=product.name, tags=tags,
+        commands=[CommandView(key=c.key, display_name=dict(c.display_name), icon=c.icon,
+                              params=[prm.model_dump() for prm in c.params])
+                  for c in template.commands] if operate else [])
+
+
+# --- protocol forms for the maker panel --------------------------------------------------------
+
+
+def _schema_fields(model: Any, skip: frozenset[str] | set[str]) -> list[dict[str, Any]]:
+    """A flat field list (name, type, enum, default, required, help) from a pydantic model."""
+    schema = model.model_json_schema()
+    defs = schema.get("$defs", {})
+    required = set(schema.get("required", []))
+
+    def resolve(prop: dict[str, Any]) -> dict[str, Any]:
+        if "$ref" in prop:
+            return resolve(defs.get(prop["$ref"].rsplit("/", 1)[-1], {}))
+        if "anyOf" in prop:
+            options = [resolve(o) for o in prop["anyOf"] if o.get("type") != "null"]
+            return options[0] if len(options) == 1 else {"type": "json"}
+        if "allOf" in prop and len(prop["allOf"]) == 1:
+            return resolve(prop["allOf"][0])
+        return prop
+
+    out = []
+    for name, prop in schema.get("properties", {}).items():
+        if name in skip:
+            continue
+        inner = resolve(prop)
+        kind = inner.get("type", "json")
+        field: dict[str, Any] = {"name": name, "required": name in required,
+                                 "type": kind if kind in ("string", "integer", "number",
+                                                          "boolean") else "json"}
+        if "enum" in inner:
+            field["type"] = "enum"
+            field["enum"] = inner["enum"]
+        for key in ("default", "minimum", "maximum"):
+            if key in prop:
+                field[key] = prop[key]
+            elif key in inner:
+                field[key] = inner[key]
+        text = prop.get("description") or inner.get("description")
+        if text:
+            field["help"] = text[:300]
+        out.append(field)
+    return out
+
+
+@cache
+def _protocol_fields() -> dict[str, Any]:
+    from hub.platform.template import TEMPLATE_TAG_FIELDS, device_classes, tag_model
+
+    out: dict[str, Any] = {}
+    for protocol, cls in sorted(device_classes().items()):
+        connection = cls.model_fields["connection"].annotation
+        out[protocol] = {
+            "connection": _schema_fields(connection, set())
+            if hasattr(connection, "model_json_schema") else [],
+            "tag": _schema_fields(tag_model(protocol), TEMPLATE_TAG_FIELDS),
+        }
+    return out
