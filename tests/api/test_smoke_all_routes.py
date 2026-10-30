@@ -27,7 +27,7 @@ UNKNOWN = {"org_id": "o_unknown", "product_id": "00000000-0000-0000-0000-0000000
            "location_id": "nope", "request_id": "00000000-0000-0000-0000-000000000000",
            "schedule_id": 999999, "session_id": "00000000-0000-0000-0000-000000000000",
            "snapshot_id": "nope", "source": "kish.x.y.z", "tag_path": "kish.x.y.z",
-           "user_id": 999999, "group_id": 999999, "ticket_id": 999999,
+           "user_id": 999999, "group_id": 999999, "ticket_id": 999999, "contact_id": 999999,
            "invoice_id": 999999, "key": "nope"}
 
 

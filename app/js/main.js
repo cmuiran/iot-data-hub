@@ -1,6 +1,7 @@
 // Router and start-up of the consumer app (hash routes; account links put their token after #).
 
-import { api, h, live, loadLanguage, saved, session, t } from "./core.js";
+import { api, h, icon, live, loadLanguage, saved, session, t } from "./core.js";
+import { startPickers } from "./picker.js";
 import { automationsPage } from "./auto.js";
 import * as more from "./more.js";
 import * as v from "./views.js";
@@ -97,6 +98,7 @@ if ("serviceWorker" in navigator) {
 await loadLanguage(saved.get("app.lang") || "fa");       // Persian first; English in "Me"
 document.title = t("app.title");
 await brand();
+startPickers({ h, icon: (n) => icon(n), t, sheetClass: "sheet" });
 render();
 
 /** ?brand=<maker org>: the maker's name on the start page and its nearest accent colour

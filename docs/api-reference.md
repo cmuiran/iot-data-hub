@@ -1,6 +1,6 @@
 # API reference
 
-Generated from the application by `scripts/api_reference.py` (223 operations). Interactive version with request and response schemas: **`/api/docs`** (Swagger) and `/api/openapi.json` on a running hub. How to call it, the WebSocket, the event stream, MQTT and TCP: `docs/fa/api-guide.md`.
+Generated from the application by `scripts/api_reference.py` (230 operations). Interactive version with request and response schemas: **`/api/docs`** (Swagger) and `/api/openapi.json` on a running hub. How to call it, the WebSocket, the event stream, MQTT and TCP: `docs/fa/api-guide.md`.
 
 Permission: the role permission the route needs (organization permissions such as `product.read` are checked again against the organization in the path); `signed in` = any user; `public` = no session.
 
@@ -69,6 +69,10 @@ Permission: the role permission the route needs (organization permissions such a
 | `PUT` | `/api/platform/organizations/{org_id}/branding` | product.manage | Save Branding |
 | `PUT` | `/api/platform/organizations/{org_id}/branding/logo` | product.manage | Put Logo |
 | `DELETE` | `/api/platform/organizations/{org_id}/branding/logo` | product.manage | Delete Logo |
+| `GET` | `/api/platform/organizations/{org_id}/contacts` | device.view | Who the home alerts by SMS or call, and whether SMS commands are set up. |
+| `POST` | `/api/platform/organizations/{org_id}/contacts` | device.view | Create Contact |
+| `PUT` | `/api/platform/organizations/{org_id}/contacts/{contact_id}` | device.view | Update Contact |
+| `DELETE` | `/api/platform/organizations/{org_id}/contacts/{contact_id}` | device.view | Delete Contact |
 | `GET` | `/api/platform/organizations/{org_id}/groups` | device.view | Groups |
 | `POST` | `/api/platform/organizations/{org_id}/groups` | device.view | Create Group |
 | `PUT` | `/api/platform/organizations/{org_id}/groups/{group_id}` | device.view | Update Group |
@@ -89,6 +93,7 @@ Permission: the role permission the route needs (organization permissions such a
 | `POST` | `/api/platform/organizations/{org_id}/scenes/{scene_id}/run` | device.view | Run now, with the caller's own rights (a viewer's writes are refused one by one). |
 | `GET` | `/api/platform/organizations/{org_id}/settings` | device.view | Home Settings |
 | `PUT` | `/api/platform/organizations/{org_id}/settings` | device.view | Save Home Settings |
+| `PUT` | `/api/platform/organizations/{org_id}/sms-pin` | device.view | The PIN an SMS command must carry (``شب 4821``); kept only as a hash. |
 | `GET` | `/api/platform/products` | product.read | List Products |
 | `POST` | `/api/platform/products` | product.manage | Create Product |
 | `GET` | `/api/platform/products/{product_id}` | product.read | Get Product |
@@ -127,6 +132,7 @@ Permission: the role permission the route needs (organization permissions such a
 | `GET` | `/api/platform/my/devices/{device_id}/history` | device.view | A tag's values over the last hours, for the app's chart (only tags the template shows on a chart). |
 | `PUT` | `/api/platform/my/devices/{device_id}/labels/{key}` | device.view | The owner or an operator names an output or reading of the device for the home ("relay 1" -> "chandelier"), picks its icon and marks it a favourite for the home screen; no name, icon or mark = the maker's own name again. |
 | `GET` | `/api/platform/my/devices/{device_id}/local-rules` | device.view | What the device runs by itself while cut off (for the app to show). |
+| `POST` | `/api/platform/my/devices/{device_id}/pulse` | device.view | A momentary key (a door opener, a bell): on now and off after ``seconds``, both through the control-safety layer with the caller's rights. The hub turns it off even if the app is closed meanwhile. |
 | `PUT` | `/api/platform/my/devices/{device_id}/room` | device.view | The room of the device in the caller's homes (each home has its own rooms); an empty room takes it out of every room. |
 | `GET` | `/api/platform/my/devices/{device_id}/sms` | device.view | The SMS fallback (owner and operators): the SIM number and the signing key, which the app keeps on the phone to sign messages while there is no internet. |
 | `PUT` | `/api/platform/my/devices/{device_id}/sms` | device.view | The owner switches the SMS fallback on: the hub makes the device's signing key (kept unless ``new_key``), the device gets it now over its own connection (``{"type": "config", "sms": {...}}``) and accepts only messages… |
@@ -291,6 +297,7 @@ Permission: the role permission the route needs (organization permissions such a
 |---|---|---|---|
 | `GET` | `/api/notifications/log` | audit.read | Notification Log |
 | `POST` | `/api/notifications/test/{channel}` | config.edit | Notification Test |
+| `POST` | `/api/sms/inbound` | public | The SMS provider forwards each received SMS here (``?token=HUB_SMS_INBOUND_TOKEN``; form or JSON with ``from`` and ``message``). A contact of a home marked for commands runs one of the home's scenes by its keyword and… |
 
 ## WebSocket
 

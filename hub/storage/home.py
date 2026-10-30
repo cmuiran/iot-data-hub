@@ -30,6 +30,18 @@ class LabelRecord(BaseModel):
     name: str | None = None
     icon: str | None = None
     favorite: bool = False
+    mode: str = "toggle"                 # toggle / dual (separate on and off keys) / momentary
+    pulse_s: float | None = None         # momentary: how long the push lasts
+
+
+class ContactRecord(BaseModel):
+    contact_id: int
+    org_id: str
+    name: str
+    phone: str
+    sms: bool = True
+    call: bool = False
+    command: bool = False
 
 
 class TicketRecord(BaseModel):
@@ -172,7 +184,7 @@ class HomeStore:
     async def labels(self, org_ids: Sequence[str], device_ids: Sequence[str] | None = None
                      ) -> dict[tuple[str, str], LabelRecord]:
         """(device_id, key) -> the home's name, icon and favourite mark."""
-        sql = ("SELECT device_id, key, name, icon, favorite FROM output_labels "
+        sql = ("SELECT device_id, key, name, icon, favorite, mode, pulse_s FROM output_labels "
                "WHERE org_id = ANY(%s)")
         args: list[Any] = [list(org_ids)]
         if device_ids is not None:
@@ -183,17 +195,70 @@ class HomeStore:
         return {(r["device_id"], r["key"]): LabelRecord.model_validate(r) for r in rows}
 
     async def save_label(self, org_id: str, device_id: str, key: str, *, name: str | None,
-                         icon: str | None, favorite: bool) -> None:
+                         icon: str | None, favorite: bool, mode: str = "toggle",
+                         pulse_s: float | None = None) -> None:
         async with self._conn() as conn:
-            if name is None and icon is None and not favorite:
+            if name is None and icon is None and not favorite and mode == "toggle":
                 await conn.execute("DELETE FROM output_labels WHERE org_id=%s AND device_id=%s "
                                    "AND key=%s", (org_id, device_id, key))
                 return
             await conn.execute(
-                "INSERT INTO output_labels (org_id, device_id, key, name, icon, favorite) "
-                "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (org_id, device_id, key) DO UPDATE SET "
-                "name=EXCLUDED.name, icon=EXCLUDED.icon, favorite=EXCLUDED.favorite, "
-                "updated_at=now()", (org_id, device_id, key, name, icon, favorite))
+                "INSERT INTO output_labels (org_id, device_id, key, name, icon, favorite, "
+                "mode, pulse_s) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (org_id, device_id, key) DO UPDATE SET name=EXCLUDED.name, "
+                "icon=EXCLUDED.icon, favorite=EXCLUDED.favorite, mode=EXCLUDED.mode, "
+                "pulse_s=EXCLUDED.pulse_s, updated_at=now()",
+                (org_id, device_id, key, name, icon, favorite, mode, pulse_s))
+
+    # --- the home's SMS / call contacts and PIN -----------------------------------------------
+
+    async def contacts(self, org_id: str) -> list[ContactRecord]:
+        async with self._conn() as conn:
+            rows = await (await conn.execute(
+                "SELECT * FROM home_contacts WHERE org_id=%s ORDER BY name", (org_id,))).fetchall()
+        return [ContactRecord.model_validate(r) for r in rows]
+
+    async def contacts_by_phone(self, phones: Sequence[str]) -> list[ContactRecord]:
+        """Every home's contacts with one of these numbers (an SMS command: whose home?)."""
+        async with self._conn() as conn:
+            rows = await (await conn.execute(
+                "SELECT * FROM home_contacts WHERE phone = ANY(%s)", (list(phones),))).fetchall()
+        return [ContactRecord.model_validate(r) for r in rows]
+
+    async def save_contact(self, org_id: str, contact_id: int | None, *, name: str, phone: str,
+                           sms: bool, call: bool, command: bool,
+                           user_id: int | None) -> ContactRecord | None:
+        async with self._conn() as conn:
+            if contact_id is None:
+                row = await (await conn.execute(
+                    "INSERT INTO home_contacts (org_id, name, phone, sms, call, command, "
+                    "created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (org_id, name, phone, sms, call, command, user_id))).fetchone()
+            else:
+                row = await (await conn.execute(
+                    "UPDATE home_contacts SET name=%s, phone=%s, sms=%s, call=%s, command=%s "
+                    "WHERE contact_id=%s AND org_id=%s RETURNING *",
+                    (name, phone, sms, call, command, contact_id, org_id))).fetchone()
+        return ContactRecord.model_validate(row) if row else None
+
+    async def delete_contact(self, org_id: str, contact_id: int) -> bool:
+        async with self._conn() as conn:
+            cur = await conn.execute("DELETE FROM home_contacts WHERE contact_id=%s AND org_id=%s",
+                                     (contact_id, org_id))
+        return cur.rowcount > 0
+
+    async def sms_pin_hash(self, org_id: str) -> str | None:
+        async with self._conn() as conn:
+            row = await (await conn.execute(
+                "SELECT sms_pin_hash FROM home_settings WHERE org_id=%s", (org_id,))).fetchone()
+        return row["sms_pin_hash"] if row else None
+
+    async def set_sms_pin_hash(self, org_id: str, pin_hash: str | None) -> None:
+        async with self._conn() as conn:
+            await conn.execute(
+                "INSERT INTO home_settings (org_id, sms_pin_hash) VALUES (%s,%s) "
+                "ON CONFLICT (org_id) DO UPDATE SET sms_pin_hash=EXCLUDED.sms_pin_hash",
+                (org_id, pin_hash))
 
     # --- SMS fallback -------------------------------------------------------------------------
 

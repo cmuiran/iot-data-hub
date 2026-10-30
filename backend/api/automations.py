@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from backend.automations import (
     TIME_TRIGGERS,
     AutomationIn,
+    CycleAction,
     OfflineTrigger,
     SceneAction,
     SceneIn,
@@ -100,7 +101,12 @@ async def _check_automation(svc: ServicesDep, org_id: str, spec: AutomationIn) -
         if spec.trigger.device_id not in levels:
             raise Invalid(f"device {spec.trigger.device_id} is not one of this "
                           "organization's", code="unknown_device")
-    await _check_refs(svc, org_id, writes=[a for a in spec.actions if isinstance(a, WriteAction)],
+    writes = [a for a in spec.actions if isinstance(a, WriteAction)]
+    for a in spec.actions:                       # a repeating timer writes both of its values
+        if isinstance(a, CycleAction):
+            writes += [WriteAction(type="write", device_id=a.device_id, tag=a.tag, value=v)
+                       for v in (a.on_value, a.off_value)]
+    await _check_refs(svc, org_id, writes=writes,
                       reads=reads,
                       scenes=[a.scene_id for a in spec.actions if isinstance(a, SceneAction)])
 
@@ -121,7 +127,8 @@ async def _save_scene(svc: ServicesDep, p: Principal, org_id: str, scene_id: int
     try:
         scene = await svc.store.automations.save_scene(
             orgs, org_id, scene_id, name=body.name, icon=body.icon,
-            actions=[a.model_dump(mode="json") for a in body.actions], user_id=p.user_id)
+            actions=[a.model_dump(mode="json") for a in body.actions], user_id=p.user_id,
+            sms_keyword=body.sms_keyword)
     except PlatformError as exc:
         raise _nf(exc) from None
     await svc.store.add_auth_audit("scene_saved", p.username, user_id=p.user_id,
@@ -239,6 +246,7 @@ async def delete_automation(org_id: str, automation_id: int, svc: ServicesDep, p
     if not await svc.store.automations.delete_automation(
             _orgs(p, "automation.manage", org_id), org_id, automation_id):
         raise NotFound("automation not found")
+    svc.automations.cancel(automation_id)        # a repeating timer that is running stops
     await svc.store.add_auth_audit("automation_deleted", p.username, user_id=p.user_id,
                                    client_addr=client_addr(request),
                                    detail={"org_id": org_id, "automation_id": automation_id})

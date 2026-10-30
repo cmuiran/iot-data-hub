@@ -140,6 +140,12 @@ class Settings(BaseModel):
     smtp_user: str | None = None
     smtp_password: str | None = None
     mail_from: str = "no-reply@localhost"
+    # SMS and voice calls (alerts to a home's contacts, scenes by an SMS keyword):
+    # "none" = off, "log" = kept in memory (development), "kavenegar" = the Kavenegar API
+    sms_provider: Literal["none", "log", "kavenegar"] = "none"
+    sms_api_key: str | None = None              # the provider's API key (HUB_SMS_API_KEY)
+    sms_sender: str | None = None               # the line the SMS comes from
+    sms_inbound_token: str | None = None        # the provider calls /api/sms/inbound with it
     verify_hours: int = Field(default=48, ge=1, le=24 * 14)
     reset_minutes: int = Field(default=60, ge=5, le=24 * 60)
     invitation_days: int = Field(default=7, ge=1, le=90)
@@ -321,6 +327,10 @@ class Settings(BaseModel):
             smtp_user=e.get("HUB_SMTP_USERNAME") or None,
             smtp_password=e.get("HUB_SMTP_PASSWORD") or None,
             mail_from=e.get("HUB_MAIL_FROM", "no-reply@localhost"),
+            sms_provider=e.get("HUB_SMS_PROVIDER", "none"),  # type: ignore[arg-type]
+            sms_api_key=e.get("HUB_SMS_API_KEY") or None,
+            sms_sender=e.get("HUB_SMS_SENDER") or None,
+            sms_inbound_token=e.get("HUB_SMS_INBOUND_TOKEN") or None,
             verify_hours=int(e.get("HUB_VERIFY_HOURS", 48)),
             reset_minutes=int(e.get("HUB_RESET_MINUTES", 60)),
             invitation_days=int(e.get("HUB_INVITATION_DAYS", 7)),

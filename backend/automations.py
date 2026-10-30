@@ -136,9 +136,12 @@ class ValueTrigger(_M):
 
 
 class OfflineTrigger(_M):
+    """The device went offline (for ``for_s``), or, with ``event: online``, came back."""
+
     type: Literal["offline"]
     device_id: Segment
-    for_s: int = Field(default=60, ge=10, le=86_400)
+    for_s: int = Field(default=60, ge=0, le=86_400)
+    event: Literal["offline", "online"] = "offline"
 
 
 class SunTrigger(Calendar):
@@ -193,11 +196,30 @@ class DelayAction(_M):
 
 
 class NotifyAction(_M):
+    """A message to the creator by e-mail, and/or to the home's contacts by SMS or a voice
+    call (those marked for it in the home's contacts)."""
+
     type: Literal["notify"]
     text: str = Field(min_length=1, max_length=300)
+    channels: list[Literal["email", "sms", "call"]] = Field(default_factory=lambda: ["email"],
+                                                            min_length=1, max_length=3)
 
 
-Action = Annotated[WriteAction | SceneAction | DelayAction | NotifyAction,
+class CycleAction(_M):
+    """A repeating timer: on for ``on_s``, off for ``off_s``, ``count`` times (0 = until the
+    timer is cancelled). The output is left off at the end."""
+
+    type: Literal["cycle"]
+    device_id: Segment
+    tag: Segment
+    on_s: float = Field(ge=1, le=86_400)
+    off_s: float = Field(ge=1, le=86_400)
+    count: int = Field(default=0, ge=0, le=10_000)
+    on_value: Value = True
+    off_value: Value = False
+
+
+Action = Annotated[WriteAction | SceneAction | DelayAction | NotifyAction | CycleAction,
                    Field(discriminator="type")]
 SceneStep = Annotated[WriteAction | DelayAction, Field(discriminator="type")]
 
@@ -231,6 +253,9 @@ class SceneIn(_M):
     name: str = Field(min_length=1, max_length=80)
     icon: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,39}$")
     actions: list[SceneStep] = Field(min_length=1, max_length=30)
+    # a word an SMS to the hub runs the scene with (with the home's PIN): "شب 4821"
+    sms_keyword: str | None = Field(default=None, min_length=2, max_length=20,
+                                    pattern=r"^[^\s\d][^\s]*$")
 
     @model_validator(mode="after")
     def _writes(self) -> SceneIn:
@@ -241,7 +266,8 @@ class SceneIn(_M):
 
 def _scene_steps(scene: Any) -> list[Any]:
     """The actions of a stored scene (SceneRecord), validated again."""
-    return SceneIn.model_validate(scene.model_dump(include={"name", "icon", "actions"})).actions
+    return SceneIn.model_validate(scene.model_dump(include={"name", "icon", "actions",
+                                                           "sms_keyword"})).actions
 
 
 # --- the calendar ------------------------------------------------------------------------------
@@ -413,7 +439,8 @@ class AutomationEngine:
             met = self._value_ok(trigger.device_id, trigger.tag, trigger.op, trigger.value)
         else:
             status = self.svc.hub.statuses.get(trigger.device_id)
-            met = status is not None and status.state is DeviceState.OFFLINE
+            want = DeviceState.ONLINE if trigger.event == "online" else DeviceState.OFFLINE
+            met = status is not None and status.state is want
         hold = timedelta(seconds=trigger.for_s)
         previous = self._edges.get(automation_id)
         if previous is None:
@@ -455,6 +482,14 @@ class AutomationEngine:
                 self.launch(record, spec, f"presence:{event}:{who}:{now.isoformat()}")
                 launched += 1
         return launched
+
+    def cancel(self, automation_id: int) -> bool:
+        """Stop a running automation (a repeating timer that was cancelled)."""
+        task = self._running.pop(automation_id, None)
+        if task is None:
+            return False
+        task.cancel()
+        return True
 
     def launch(self, record: Any, spec: AutomationIn, key: str) -> None:
         task = asyncio.create_task(self.run(record, spec, key), name=f"automation:{key}")
@@ -531,7 +566,10 @@ class AutomationEngine:
                     await asyncio.sleep(action.seconds)
                 detail.append({"delay_s": action.seconds, "result": "ok"})
             elif isinstance(action, NotifyAction):
-                detail.append(await self._notify(creator, spec, action, dry))
+                detail.append(await self._notify(creator, spec, action, dry,
+                                                 getattr(record, "org_id", None)))
+            elif isinstance(action, CycleAction):
+                detail.append(await self._cycle(record, spec, action, creator, dry, reason))
             elif isinstance(action, SceneAction):
                 if depth:
                     detail.append({"scene": action.scene_id, "result": "failed",
@@ -583,8 +621,68 @@ class AutomationEngine:
         return info | {"result": result.result, "message": result.message,
                        "request_id": str(result.request_id)}
 
+    async def _cycle(self, record: Any, spec: AutomationIn | None, action: CycleAction,
+                     creator: Principal, dry: bool, reason: str) -> dict[str, Any]:
+        path = platform_tag_path(action.device_id, action.tag)
+        info: dict[str, Any] = {"tag": path, "cycle": True}
+        if dry:
+            return info | {"result": "would_write"}
+        on = WriteAction(type="write", device_id=action.device_id, tag=action.tag,
+                         value=action.on_value)
+        off = WriteAction(type="write", device_id=action.device_id, tag=action.tag,
+                          value=action.off_value)
+        async def write(w: WriteAction) -> dict[str, Any]:
+            # a step shorter than the safety layer's minimum time between two writes of the
+            # output waits for it (the cycle stretches, the output is never left on)
+            for _ in range(60):
+                r = await self._write(record, None, w, creator, dry, reason)
+                if r["result"] != "rejected_rate":
+                    return r
+                await asyncio.sleep(0.5)
+            return r
+
+        done = failures = 0
+        try:
+            while action.count == 0 or done < action.count:
+                r = await write(on)
+                failures = 0 if r["result"] == "applied" else failures + 1
+                if failures >= 3:
+                    return info | {"result": "failed", "cycles": done,
+                                   "message": r.get("message") or r["result"]}
+                await asyncio.sleep(action.on_s)
+                await write(off)
+                done += 1
+                if action.count == 0 or done < action.count:
+                    await asyncio.sleep(action.off_s)
+        except asyncio.CancelledError:          # cancelled: leave the output off
+            await asyncio.shield(write(off))
+            raise
+        return info | {"result": "applied", "cycles": done}
+
     async def _notify(self, creator: Principal, spec: AutomationIn | None,
-                      action: NotifyAction, dry: bool) -> dict[str, Any]:
+                      action: NotifyAction, dry: bool, org_id: str | None = None
+                      ) -> dict[str, Any]:
+        out: dict[str, Any] = {"notify": True, "result": "ok"}
+        if {"sms", "call"} & set(action.channels) and org_id:
+            contacts = await self.svc.store.home.contacts(org_id)
+            name = spec.name if spec else ""
+            text = f"{name}: {action.text}" if name else action.text
+            reached = 0
+            for c in contacts[:10]:
+                for channel in ("sms", "call"):
+                    if channel in action.channels and getattr(c, channel):
+                        if dry:
+                            reached += 1
+                            continue
+                        gateway = self.svc.sms
+                        ok = await (gateway.send(c.phone, text) if channel == "sms"
+                                    else gateway.call(c.phone, text))
+                        reached += bool(ok)
+            out["reached"] = reached
+            if not reached:
+                out = out | {"result": "failed", "message": "no contact was reached by SMS or call"}
+        if "email" not in action.channels:
+            return out
         email = creator.user.email
         if not email:
             return {"notify": True, "result": "failed", "message": "the creator has no e-mail"}
@@ -597,7 +695,7 @@ class AutomationEngine:
                 await self.svc.accounts.mailer.send(email, subject, body)
             except Exception as exc:  # noqa: BLE001
                 return {"notify": True, "result": "failed", "message": str(exc)}
-        return {"notify": True, "result": "ok"}
+        return out
 
     async def run_scene(self, principal: Principal, scene: Any) -> list[dict[str, Any]]:
         """A scene run by a person, with that person's rights."""

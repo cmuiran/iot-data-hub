@@ -44,6 +44,7 @@ const PATHS = {
   chip: "M7 7h10v10H7zM9 3v4M15 3v4M9 17v4M15 17v4M3 9h4M3 15h4M17 9h4M17 15h4",
   image: "M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M15 9h0",
   globe: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18",
+  chevron: "M6 9l6 6 6-6",
   menu: "M4 6h16M4 12h16M4 18h16",
 };
 

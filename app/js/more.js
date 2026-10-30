@@ -41,14 +41,19 @@ function jalali(iso, time = false) {
     .format(new Date(iso));
 }
 
-export async function command(deviceId, key, value, quiet = false) {
+export async function command(deviceId, key, value, quiet = false, silentFail = false) {
   try {
     const r = await api("POST", "/api/control/write",
       { tag: `platform.devices.${deviceId}.${key}`, value, reason: "app" });
     if (r.result === "applied") { if (!quiet) toast(t("device.done"), "ok"); }
     else toast(t(`write.${r.result}`) !== `write.${r.result}` ? t(`write.${r.result}`) : r.message, "err");
     return r;
-  } catch (err) { toast(errorText(err), "err"); return null; }
+  } catch (err) {
+    // no answer at all (no internet, the hub unreachable): the caller may try another way
+    if (silentFail && (err.status === 0 || err.status >= 502 || !navigator.onLine)) return null;
+    toast(errorText(err), "err");
+    return null;
+  }
 }
 
 // --- groups --------------------------------------------------------------------------------------
@@ -185,7 +190,7 @@ export function groupPage(state, groupId) {
           sections.length ? t("groups.others") : t("device.outputs")),
         h("span", { class: "small accent-text" }, t("device.on_count", { n: num(onCount), total: num(outs.length) }))),
         h("div", { class: "outputs" }, rest.map(({ v, x }) => outButton(v.device.device_id, x, draw,
-          { sub: combined ? v.device.name : null, disabled: !editing && v.device.state !== "online", editing }))),
+          { sub: combined ? v.device.name : null, offline: v.device.state !== "online", editing }))),
         h("div", { class: "two" }, allOnBtn, allOffBtn)) : null,
       outs.length && !rest.length ? h("div", { class: "two" }, allOnBtn, allOffBtn) : null,
       reads.length ? h("section", { class: "stack" }, h("h2", { class: "h2" }, t("device.readings")),
@@ -324,9 +329,115 @@ export function homeSettings(state, orgId) {
         h("div", { class: "two" }, labelled(t("homeset.peak_from"), peakFrom), labelled(t("homeset.peak_to"), peakTo)),
         h("div", { class: "two" }, labelled(t("homeset.factor"), factor), labelled(t("homeset.tax"), tax)),
         labelled(t("homeset.fixed"), fixed)),
-      save);
+      save, contactsSection(orgId, owner), connectionSection(orgId));
   })();
   return page;
+}
+
+/** The people the home alerts by SMS or a call, who may run scenes by SMS, and the PIN. */
+function contactsSection(orgId, owner) {
+  const box = h("section", { class: "card stack" }, h("div", { class: "row between" },
+    h("h2", { class: "h2" }, t("contacts.title")), h("span", { class: "row tiny muted" }, icon("call"))),
+  h("p", { class: "small muted lh" }, t("contacts.help")));
+  const body = h("div", { class: "stack" }, loading());
+  const draw = async () => {
+    let data;
+    try { data = await api("GET", `/api/platform/organizations/${orgId}/contacts`); }
+    catch { box.remove(); return; }
+    const rows = data.contacts.map((c) => h("button", { class: "reading pick", disabled: !owner,
+      onclick: async () => { if (await contactDialog(orgId, c)) draw(); } },
+    h("span", { class: "stack tight" }, h("span", {}, c.name), h("span", { class: "tiny muted ltr" }, c.phone)),
+    h("span", { class: "row" }, c.sms ? h("span", { class: "chip ok" }, icon("chat"), t("contacts.sms")) : null,
+      c.call ? h("span", { class: "chip accent" }, icon("call"), t("contacts.call")) : null,
+      c.command ? h("span", { class: "chip violet" }, icon("sliders"), t("contacts.command")) : null)));
+    const add = h("button", { class: "btn block", disabled: !owner || data.contacts.length >= 10 }, icon("plus"), t("contacts.add"));
+    add.addEventListener("click", async () => { if (await contactDialog(orgId, null)) draw(); });
+    const pin = input({ type: "password", inputmode: "numeric", autocomplete: "off", dir: "ltr", maxlength: 8,
+      placeholder: data.pin_set ? "••••" : t("contacts.pin_hint"), disabled: !owner, "aria-label": t("contacts.pin") });
+    const setPin = h("button", { class: "btn", disabled: !owner }, data.pin_set ? t("contacts.pin_change") : t("contacts.pin_set"));
+    setPin.addEventListener("click", busy(setPin, async () => {
+      if (!/^[0-9]{4,8}$/.test(pin.value)) { toast(t("contacts.pin_bad"), "err"); return; }
+      await api("PUT", `/api/platform/organizations/${orgId}/sms-pin`, { pin: pin.value });
+      toast(t("common.saved"), "ok");
+      draw();
+    }));
+    const offPin = data.pin_set && owner ? h("button", { class: "btn danger" }, t("contacts.pin_off")) : null;
+    offPin?.addEventListener("click", busy(offPin, async () => {
+      await api("PUT", `/api/platform/organizations/${orgId}/sms-pin`, { pin: null });
+      draw();
+    }));
+    fill(body, data.gateway ? null : h("p", { class: "note-warn small lh" }, t("contacts.no_gateway")),
+      ...(rows.length ? rows : [h("p", { class: "small muted" }, t("contacts.none"))]), add,
+      h("span", { class: "label" }, t("contacts.pin")), h("p", { class: "tiny muted lh" }, t("contacts.pin_help")),
+      h("div", { class: "row" }, pin, setPin), offPin);
+  };
+  draw();
+  put(box, body);
+  return box;
+}
+
+async function contactDialog(orgId, c) {
+  const nameIn = input({ value: c?.name || "", maxlength: 60, "aria-label": t("contacts.name") });
+  const phone = input({ type: "tel", dir: "ltr", value: c?.phone || "", placeholder: "0912…", "aria-label": t("contacts.phone") });
+  const flag = (key, ic, on) => {
+    const cb = h("input", { type: "checkbox", checked: on });
+    return [cb, h("label", { class: "check-row" }, cb, icon(ic), h("span", { class: "small" }, t(`contacts.${key}_long`)))];
+  };
+  const [sms, smsRow] = flag("sms", "chat", c ? c.sms : true);
+  const [call, callRow] = flag("call", "call", c ? c.call : false);
+  const [cmd, cmdRow] = flag("command", "sliders", c ? c.command : false);
+  const buttons = [["cancel", t("common.cancel")], ["save", t("common.save"), "primary"]];
+  if (c) buttons.unshift(["delete", t("auto.delete"), "danger"]);
+  for (;;) {
+    const answer = await dialog(c ? t("contacts.edit") : t("contacts.add"), h("div", { class: "stack" },
+      labelled(t("contacts.name"), nameIn), labelled(t("contacts.phone"), phone), smsRow, callRow, cmdRow,
+      h("span", { class: "tiny muted lh" }, t("contacts.command_help"))), buttons);
+    try {
+      if (answer === "delete") {
+        await api("DELETE", `/api/platform/organizations/${orgId}/contacts/${c.contact_id}`);
+        return true;
+      }
+      if (answer !== "save") return false;
+      const body = { name: nameIn.value.trim() || phone.value.trim(), phone: phone.value.trim().replace(/[۰-۹]/g,
+        (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[\s-]/g, ""), sms: sms.checked, call: call.checked, command: cmd.checked };
+      if (c) await api("PUT", `/api/platform/organizations/${orgId}/contacts/${c.contact_id}`, body);
+      else await api("POST", `/api/platform/organizations/${orgId}/contacts`, body);
+      toast(t("common.saved"), "ok");
+      return true;
+    } catch (err) { toast(errorText(err), "err"); }
+  }
+}
+
+/** How this phone reaches the home's devices: over the internet first, then the home's own
+ * hub on the local network (when it has one), then SMS. Kept on this phone. */
+function connectionSection(orgId) {
+  const key = `app.connect.${orgId}`;
+  const current = connection(orgId);
+  const order = h("select", { class: "input", "aria-label": t("connect.order") },
+    [["auto", t("connect.auto")], ["cloud", t("connect.cloud")], ["sms", t("connect.sms")]].map(([v, l]) =>
+      h("option", { value: v, selected: v === current.order }, l)));
+  const local = input({ type: "url", dir: "ltr", value: current.local || "", placeholder: t("connect.local_hint"),
+    "aria-label": t("connect.local") });
+  const save = h("button", { class: "btn" }, t("common.save"));
+  save.addEventListener("click", () => {
+    const url = local.value.trim();
+    if (url && !/^https?:\/\/[^\s/]+(:\d+)?\/?$/.test(url)) { toast(t("connect.bad_url"), "err"); return; }
+    saved.set(key, JSON.stringify({ order: order.value, local: url.replace(/\/$/, "") }));
+    toast(t("common.saved"), "ok");
+  });
+  return h("section", { class: "card stack" }, h("div", { class: "row between" },
+    h("h2", { class: "h2" }, t("connect.title")), h("span", { class: "row tiny muted" }, icon("globe"))),
+  h("div", { class: "connect-steps" }, [["globe", t("connect.step_cloud")], ["hub", t("connect.step_local")],
+    ["chat", t("connect.step_sms")]].map(([ic, label], i) => h("span", { class: "connect-step" },
+    h("span", { class: "n" }, num(i + 1)), icon(ic), h("span", { class: "small" }, label)))),
+  labelled(t("connect.order"), order), labelled(t("connect.local"), local),
+  h("p", { class: "tiny muted lh" }, t("connect.help")), save);
+}
+
+/** This phone's way to the home: { order: auto | cloud | sms, local: the local hub address }. */
+export function connection(orgId) {
+  try { return { order: "auto", local: "", ...JSON.parse(saved.get(`app.connect.${orgId}`) || "{}") }; }
+  catch { return { order: "auto", local: "" }; }
 }
 
 /** Presence: while the app is open, compare the phone's place with the home's and report a
@@ -498,8 +609,8 @@ export async function smsSignature(key, deviceId, counter, items) {
 }
 
 /** Pick output states; the app writes and signs the SMS (`HUB <counter> relay_1=1 relay_2=0 <sig>`). */
-export function composer(d, outputs, s) {
-  const states = new Map();
+export function composer(d, outputs, s, preset = {}) {
+  const states = new Map(Object.entries(preset));
   const text = h("div", { class: "code mono ltr sms-text" });
   const link = h("a", { class: "btn primary", href: "#" }, icon("share"), t("sms.send"));
   const copy = h("button", { class: "btn" }, t("sms.copy"));
@@ -531,6 +642,7 @@ export function composer(d, outputs, s) {
       update();
     } }, h("option", { value: "" }, t("sms.no_change")), h("option", { value: "1" }, t("device.on")),
     h("option", { value: "0" }, t("device.off")));
+    if (x.key in preset) sel.value = preset[x.key] ? "1" : "0";
     selects.push([x, sel]);
     return h("div", { class: "reading" }, h("span", { class: "row" }, icon(x.icon || "power"), name(x.display_name)), sel);
   });
@@ -559,38 +671,99 @@ export function timersSection(d, outputs, redraw) {
   const load = () => api("GET", `/api/platform/my/devices/${d.device_id}/timers`).then((rows) => {
     fill(list, ...(rows.length ? rows.map((r) => {
       const tag = outputs.find((x) => x.key === r.tag);
+      const who = tag ? name(tag.display_name) : r.tag;
       const cancel = h("button", { class: "icon-btn", "aria-label": t("timer.cancel") }, icon("x"));
       cancel.addEventListener("click", busy(cancel, async () => {
         await api("DELETE", `/api/platform/my/devices/${d.device_id}/timers/${r.automation_id}`);
         load();
+        redraw?.();
       }));
-      return h("div", { class: "reading" }, h("span", { class: "stack tight" },
-        h("span", { class: "small" }, t(r.value ? "timer.will_on" : "timer.will_off", { name: tag ? name(tag.display_name) : r.tag })),
-        h("span", { class: "tiny muted" }, t("timer.at", { at: jalali(r.at, true) }))), cancel);
+      const what = r.mode === "cycle"
+        ? t(r.count ? "timer.cycle_n" : "timer.cycle_forever", { name: who, on: duration(r.on_s), off: duration(r.off_s), n: num(r.count) })
+        : t(r.value ? "timer.will_on" : "timer.will_off", { name: who });
+      const when = r.mode === "cycle" && r.running ? t("timer.running") : t("timer.at", { at: jalali(r.at, true) });
+      return h("div", { class: `reading ${r.running ? "live-row" : ""}` }, h("span", { class: "stack tight" },
+        h("span", { class: "small row" }, icon(r.mode === "cycle" ? "repeat" : "clock"), what),
+        h("span", { class: "tiny muted" }, when)), cancel);
     }) : [h("p", { class: "small muted" }, t("timer.none"))]));
   }).catch(() => box.remove());
   load();
   const add = h("button", { class: "btn block" }, icon("plus"), t("timer.new"));
-  add.addEventListener("click", busy(add, async () => {
-    const tag = h("select", { class: "input", "aria-label": t("auto.output") },
-      outputs.map((x) => h("option", { value: x.key }, name(x.display_name))));
-    const state = h("select", { class: "input", "aria-label": t("auto.state") },
-      h("option", { value: "false" }, t("device.turn_off")), h("option", { value: "true" }, t("device.turn_on")));
-    const minutes = input({ type: "number", min: 1, max: 1440, value: 30, dir: "ltr", "aria-label": t("timer.minutes") });
-    const quick = h("div", { class: "row wrap" }, [15, 30, 60, 120].map((m) => h("button", { type: "button", class: "tab",
-      onclick: () => { minutes.value = m; } }, t("timer.min_n", { n: num(m) }))));
-    const answer = await dialog(t("timer.new"), h("div", { class: "stack" }, labelled(t("auto.output"), tag),
-      labelled(t("auto.state"), state), labelled(t("timer.minutes"), minutes), quick),
-    [["cancel", t("common.cancel")], ["ok", t("timer.start"), "primary"]]);
-    if (answer !== "ok") return;
-    await api("POST", `/api/platform/my/devices/${d.device_id}/timers`,
-      { tag: tag.value, value: state.value === "true", minutes: Number(minutes.value) || 30 });
-    toast(t("timer.started", { n: num(Number(minutes.value) || 30) }), "ok");
-    load();
-    redraw?.();
-  }));
+  add.addEventListener("click", busy(add, () => timerDialog(d, outputs, () => { load(); redraw?.(); })));
   put(box, list, add);
   return box;
+}
+
+/** "1:30" from 90 s, "2 h" from 7200 s: short, for the timers list. */
+function duration(s) {
+  const n = Math.round(Number(s) || 0);
+  if (n % 3600 === 0 && n >= 3600) return t("timer.h_n", { n: num(n / 3600) });
+  if (n % 60 === 0 && n >= 60) return t("timer.m_n", { n: num(n / 60) });
+  return n >= 60 ? `${num(Math.floor(n / 60))}:${String(n % 60).padStart(2, "0")}` : t("timer.s_n", { n: num(n) });
+}
+
+/** Hours, minutes, seconds in one row; returns [element, () => seconds]. */
+function hms(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const box = (v, max, label) => input({ type: "number", min: 0, max, value: v, dir: "ltr", class: "input hms", "aria-label": label });
+  const hh = box(Math.floor(s / 3600), 23, t("timer.hours"));
+  const mm = box(Math.floor((s % 3600) / 60), 59, t("timer.minutes_short"));
+  const ss = box(s % 60, 59, t("timer.seconds"));
+  const el = h("div", { class: "hms-row ltr" }, hh, h("span", { class: "muted" }, ":"), mm, h("span", { class: "muted" }, ":"), ss);
+  return [el, () => (Number(hh.value) || 0) * 3600 + (Number(mm.value) || 0) * 60 + (Number(ss.value) || 0)];
+}
+
+/** A new timer: once ("turn off in 30 minutes"), repeating (on y, off z, until cancelled) or
+ * repeating a number of times. */
+async function timerDialog(d, outputs, done) {
+  let mode = "once";
+  const tag = h("select", { class: "input", "aria-label": t("auto.output") },
+    outputs.map((x) => h("option", { value: x.key }, name(x.display_name))));
+  const state = h("select", { class: "input", "aria-label": t("auto.state") },
+    h("option", { value: "false" }, t("device.turn_off")), h("option", { value: "true" }, t("device.turn_on")));
+  const minutes = input({ type: "number", min: 1, max: 1440, value: 30, dir: "ltr", "aria-label": t("timer.minutes") });
+  const quick = h("div", { class: "row wrap" }, [15, 30, 60, 120].map((m) => h("button", { type: "button", class: "tab",
+    onclick: () => { minutes.value = m; } }, t("timer.min_n", { n: num(m) }))));
+  const [onBox, onSeconds] = hms(60);
+  const [offBox, offSeconds] = hms(60);
+  const count = input({ type: "number", min: 1, max: 10000, value: 5, dir: "ltr", "aria-label": t("timer.count") });
+  const delay = input({ type: "number", min: 0, max: 1440, value: 0, dir: "ltr", "aria-label": t("timer.start_in") });
+  const once = h("div", { class: "stack" }, labelled(t("auto.state"), state), labelled(t("timer.minutes"), minutes), quick);
+  const cycle = h("div", { class: "stack hidden" },
+    labelled(t("timer.on_for"), onBox), labelled(t("timer.off_for"), offBox),
+    h("div", { class: "field count-field" }, h("span", { class: "label" }, t("timer.count")), count),
+    labelled(t("timer.start_in"), delay), h("p", { class: "tiny muted lh" }, t("timer.cycle_help")));
+  const kinds = [["once", t("timer.kind_once"), "clock"], ["forever", t("timer.kind_forever"), "repeat"],
+    ["limited", t("timer.kind_limited"), "repeat"]];
+  let kind = "once";
+  const seg = h("div", { class: "choice", role: "radiogroup" }, kinds.map(([k, label, ic]) => {
+    const b = h("button", { type: "button", class: `choice-item ${k === kind ? "on" : ""}`, role: "radio", "aria-checked": k === kind,
+      onclick: () => {
+        kind = k;
+        mode = k === "once" ? "once" : "cycle";
+        for (const o of seg.children) { o.classList.toggle("on", o === b); o.setAttribute("aria-checked", String(o === b)); }
+        once.classList.toggle("hidden", mode !== "once");
+        cycle.classList.toggle("hidden", mode !== "cycle");
+        cycle.querySelector(".count-field").classList.toggle("hidden", k !== "limited");
+      } }, icon(ic), h("span", {}, label));
+    return b;
+  }));
+  for (;;) {
+    const answer = await dialog(t("timer.new"), h("div", { class: "stack" }, seg, labelled(t("auto.output"), tag), once, cycle),
+      [["cancel", t("common.cancel")], ["ok", t("timer.start"), "primary"]]);
+    if (answer !== "ok") return;
+    const body = mode === "once"
+      ? { tag: tag.value, value: state.value === "true", minutes: Number(minutes.value) || 30 }
+      : { tag: tag.value, mode: "cycle", minutes: Number(delay.value) || 0, on_s: onSeconds(), off_s: offSeconds(),
+        count: kind === "limited" ? Math.max(1, Number(count.value) || 1) : 0 };
+    if (mode === "cycle" && (body.on_s < 1 || body.off_s < 1)) { toast(t("timer.need_times"), "err"); continue; }
+    try {
+      await api("POST", `/api/platform/my/devices/${d.device_id}/timers`, body);
+    } catch (err) { toast(errorText(err), "err"); continue; }
+    toast(mode === "once" ? t("timer.started", { n: num(body.minutes) }) : t("timer.cycle_started"), "ok");
+    done();
+    return;
+  }
 }
 
 // --- commands with several parameters -----------------------------------------------------------

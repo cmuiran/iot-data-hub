@@ -39,6 +39,7 @@ class Services:
     health_watch: Any = None    # backend.health_watch.HealthWatch (system health alarms)
     modbus_server: Any = None   # backend.modbus_server.HubModbusServer
     accounts: Any = None        # backend.accounts.AccountService (sign-up, invitations, shares)
+    sms: Any = None             # backend.sms gateway (alerts by SMS / call, SMS commands)
     claims: Any = None          # backend.claims.ClaimService (labels, claims, edge hubs)
     ingest: Any = None          # backend.ingest.Ingest (native devices: MQTT / HTTP / TCP)
     tcp_ingest: Any = None      # backend.tcp_ingest.TcpIngest (HUB_TCP_INGEST_PORT)
@@ -76,6 +77,9 @@ class Services:
             from backend.modbus_server import HubModbusServer
 
             self.modbus_server = HubModbusServer(self)
+        if self.sms is None:
+            from backend.sms import make_sms
+            self.sms = make_sms(self.settings)
         if self.accounts is None:
             from backend.accounts import AccountService
             from backend.mailer import make_mailer

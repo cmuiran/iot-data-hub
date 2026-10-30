@@ -24,6 +24,7 @@ class SceneRecord(BaseModel):
     name: str
     icon: str | None = None
     actions: list[dict[str, Any]]
+    sms_keyword: str | None = None
     created_by: int | None = None
     updated_at: datetime
 
@@ -86,19 +87,22 @@ class AutomationStore:
 
     async def save_scene(self, orgs: set[str] | None, org_id: str, scene_id: int | None, *,
                          name: str, icon: str | None, actions: list[dict[str, Any]],
-                         user_id: int | None) -> SceneRecord:
+                         user_id: int | None, sms_keyword: str | None = None) -> SceneRecord:
         try:
             async with self._tx(orgs) as conn:
                 if scene_id is None:
                     row = await (await conn.execute(
-                        "INSERT INTO scenes (org_id, name, icon, actions, created_by) "
-                        "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                        (org_id, name, icon, Jsonb(actions), user_id))).fetchone()
+                        "INSERT INTO scenes (org_id, name, icon, actions, sms_keyword, "
+                        "created_by) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                        (org_id, name, icon, Jsonb(actions), sms_keyword, user_id))).fetchone()
                 else:
                     row = await (await conn.execute(
-                        "UPDATE scenes SET name=%s, icon=%s, actions=%s, updated_at=now() "
-                        "WHERE scene_id=%s AND org_id=%s RETURNING *",
-                        (name, icon, Jsonb(actions), scene_id, org_id))).fetchone()
+                        "UPDATE scenes SET name=%s, icon=%s, actions=%s, sms_keyword=%s, "
+                        "updated_at=now() WHERE scene_id=%s AND org_id=%s RETURNING *",
+                        (name, icon, Jsonb(actions), sms_keyword, scene_id, org_id))).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise PlatformError("another scene of the home has this SMS keyword",
+                                "duplicate_keyword") from None
         except psycopg.errors.InsufficientPrivilege:
             raise PlatformError("organization not found", "not_found") from None
         if row is None:

@@ -916,6 +916,8 @@ class TagView(BaseModel):
     default_name: dict[str, str] | None = None   # the maker's, when the home renamed it
     icon: str | None = None                      # the home's choice
     favorite: bool = False
+    mode: str = "toggle"                         # how the home switches it (toggle/dual/momentary)
+    pulse_s: float | None = None
 
 
 class CommandView(BaseModel):
@@ -968,6 +970,7 @@ async def my_device_view(device_id: str, svc: ServicesDep, p: Viewer) -> DeviceV
             display_name={"fa": label.name, "en": label.name} if label and label.name else names,
             default_name=names if label and label.name else None,
             icon=label.icon if label else None, favorite=bool(label and label.favorite),
+            mode=label.mode if label else "toggle", pulse_s=label.pulse_s if label else None,
             data_type=str(t.data_type), unit=t.unit, min=t.min, max=t.max, states=t.states,
             writable=operate and str(t.access) == "read_write",
             ui=t.ui.model_dump(exclude_none=True),

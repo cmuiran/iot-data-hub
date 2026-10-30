@@ -347,3 +347,107 @@ async def test_tickets_branding_trend_csv_billing_and_delete(backend: Backend) -
     r = await b.client.post("/api/auth/login", json={"username": "sara@example.com",
                                                      "password": "Correct-Horse-42"})
     assert r.status_code == 401
+
+
+
+async def test_cycle_timer_momentary_and_switch_types(backend: Backend) -> None:
+    b = backend
+    _, sara, omid, device_id, secret = await owned_device(b)
+    base = f"/api/platform/my/devices/{device_id}"
+    sim = NativeDeviceSim(device_id, secret, {"relay_1": False, "relay_2": False, "power": 0.0})
+    seen: list[bool] = []
+    stop = asyncio.Event()
+    async with running(sim.run_http(b.client, 0.05, stop)):
+        await b.wait(lambda: f"platform.devices.{device_id}.relay_1" in b.services.hub.latest)
+        # a repeating timer: on 1 s, off 1 s, twice, starting now; the output ends off
+        r = await b.client.post(f"{base}/timers", headers=sara, json={
+            "tag": "relay_1", "mode": "cycle", "minutes": 0, "on_s": 1, "off_s": 1, "count": 2})
+        assert r.status_code == 201, r.text
+        listed = (await b.client.get(f"{base}/timers", headers=sara)).json()
+        assert listed[0]["mode"] == "cycle" and listed[0]["count"] == 2
+        for _ in range(60):
+            seen.append(sim.values["relay_1"])
+            await asyncio.sleep(0.1)
+        assert True in seen and sim.values["relay_1"] is False
+        # an endless one is cancelled: it stops and leaves the output off
+        r = await b.client.post(f"{base}/timers", headers=sara, json={
+            "tag": "relay_2", "mode": "cycle", "minutes": 0, "on_s": 30, "off_s": 1})
+        tid = r.json()["automation_id"]
+        await b.wait(lambda: sim.values["relay_2"] is True)
+        assert (await b.client.delete(f"{base}/timers/{tid}", headers=sara)).status_code == 204
+        await b.wait(lambda: sim.values["relay_2"] is False)
+        # a momentary key: on now, off by itself
+        r = await b.client.post(f"{base}/pulse", headers=sara, json={"tag": "relay_1",
+                                                                     "seconds": 0.5})
+        assert r.json()["result"] == "applied", r.text
+        assert sim.values["relay_1"] is True
+        await b.wait(lambda: sim.values["relay_1"] is False)
+        assert (await b.client.post(f"{base}/pulse", headers=omid,
+                                    json={"tag": "relay_1"})).status_code == 404
+        stop.set()
+    r = await b.client.put(f"{base}/labels/relay_3", headers=sara,
+                           json={"name": "در", "icon": "door", "mode": "momentary"})
+    assert r.json()["pulse_s"] == 1.0
+    await b.client.put(f"{base}/labels/relay_4", headers=sara, json={"mode": "dual"})
+    view = (await b.client.get(f"{base}/view", headers=sara)).json()
+    modes = {t["key"]: (t["mode"], t["pulse_s"]) for t in view["tags"]}
+    assert modes["relay_3"] == ("momentary", 1.0) and modes["relay_4"] == ("dual", None)
+    assert modes["relay_1"] == ("toggle", None)
+
+
+async def test_contacts_sms_alerts_and_sms_scenes(backend: Backend) -> None:
+    from backend.sms import SmsOutbox
+
+    b = backend
+    b.services.sms = outbox = SmsOutbox()
+    b.services.settings.sms_inbound_token = "t" * 24
+    _, sara, omid, device_id, secret = await owned_device(b)
+    home = await _home(b, sara)
+    base = f"/api/platform/organizations/{home}"
+    r = await b.client.post(f"{base}/contacts", headers=sara, json={
+        "name": "سارا", "phone": "+989121234567", "sms": True, "call": True, "command": True})
+    assert r.status_code == 201 and r.json()["phone"] == "09121234567", r.text
+    assert (await b.client.post(f"{base}/contacts", headers=sara, json={
+        "name": "x", "phone": "09121234567"})).status_code == 409
+    assert (await b.client.get(f"{base}/contacts", headers=omid)).status_code == 404
+    assert (await b.client.put(f"{base}/sms-pin", headers=sara,
+                               json={"pin": "4821"})).status_code == 204
+    listed = (await b.client.get(f"{base}/contacts", headers=sara)).json()
+    assert listed["pin_set"] is True and listed["gateway"] is True
+    assert "4821" not in str(listed)
+    # an alert to the contacts by SMS and a call
+    auto = (await b.client.post(f"{base}/automations", headers=sara, json={
+        "name": "هشدار", "trigger": {"type": "time", "at": "08:00"},
+        "actions": [{"type": "notify", "text": "دمای زیاد", "channels": ["sms", "call"]}]})).json()
+    r = await b.client.post(f"{base}/automations/{auto['automation_id']}/test", headers=sara)
+    assert r.status_code == 200, r.text
+    record = await b.services.store.automations.automation(None, auto["automation_id"])
+    from backend.automations import AutomationIn
+
+    await b.services.automations.run(record, AutomationIn.from_record(record), "test-run")
+    assert [k for k, _, _ in outbox.sent] == ["sms", "call"]
+    assert "دمای زیاد" in outbox.sent[0][2]
+    # a scene by an SMS keyword and the PIN; a wrong PIN and a stranger get nothing
+    scene = (await b.client.post(f"{base}/scenes", headers=sara, json={
+        "name": "شب", "sms_keyword": "شب", "actions": [
+            {"type": "write", "device_id": device_id, "tag": "relay_1", "value": True}]})).json()
+    assert (await b.client.post(f"{base}/scenes", headers=sara, json={
+        "name": "x", "sms_keyword": "شب", "actions": [
+            {"type": "write", "device_id": device_id, "tag": "relay_2", "value": True}]})
+            ).status_code == 409
+    inbound = "/api/sms/inbound?token=" + "t" * 24
+    assert (await b.client.post("/api/sms/inbound?token=wrong", data={
+        "from": "09121234567", "message": "شب 4821"})).status_code == 403
+    outbox.sent.clear()
+    r = await b.client.post(inbound, data={"from": "09121234567", "message": "شب 1111"})
+    assert r.json()["result"] == "ignored" and outbox.sent == []
+    r = await b.client.post(inbound, data={"from": "09350000000", "message": "شب 4821"})
+    assert r.json()["result"] == "ignored"
+    sim = NativeDeviceSim(device_id, secret, {"relay_1": False, "relay_2": False, "power": 0.0})
+    stop = asyncio.Event()
+    async with running(sim.run_http(b.client, 0.05, stop)):
+        await b.wait(lambda: f"platform.devices.{device_id}.relay_1" in b.services.hub.latest)
+        r = await b.client.post(inbound, json={"from": "+989121234567", "message": "4821 شب"})
+        stop.set()
+    assert r.json() == {"result": "ok", "scene_id": scene["scene_id"]}, r.text
+    assert sim.values["relay_1"] is True and outbox.sent[-1][1] == "09121234567"

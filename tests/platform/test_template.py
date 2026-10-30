@@ -140,6 +140,37 @@ def test_any_number_of_tags() -> None:
     assert len(template.tags) == n
 
 
+def test_climate_roles() -> None:
+    """An AC's tags carry a climate role (the app builds one panel from them); others fail."""
+    ac = {"group": "AC"}
+    tags = [{"key": "ac_power", "kind": "digital_output", "display_name": {"en": "AC"},
+             "data_type": "bool", "access": "read_write", "ui": ac | {"role": "climate_power"}},
+            {"key": "ac_mode", "kind": "parameter", "display_name": {"en": "Mode"},
+             "data_type": "uint16", "access": "read_write", "min": 0, "max": 1,
+             "states": {0: "Cool", 1: "Heat"}, "ui": ac | {"role": "climate_mode"}}]
+    binding = {"ac_power": {"register_type": "coil", "address": 0},
+               "ac_mode": {"register_type": "holding", "address": 0}}
+    template = ProductTemplate.model_validate(
+        {"tags": tags, "bindings": {"modbus_tcp": {"tags": binding}}})
+    assert [t.ui.role for t in template.tags] == ["climate_power", "climate_mode"]
+    # a role is only allowed where the module can do it
+    for bad, message in (
+        (tags[1] | {"states": None}, "climate_mode needs a controllable integer"),
+        (tags[1] | {"access": "read", "kind": "variable", "min": None, "max": None},
+         "climate_mode needs a controllable integer"),
+        (tags[0] | {"ui": ac | {"role": "climate_setpoint"}}, "climate_setpoint needs"),
+        (tags[1] | {"ui": ac | {"role": "climate_power"}}, "a second climate_power"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            ProductTemplate.model_validate({"tags": [tags[0], bad] if bad["key"] != "ac_power"
+                                            else [bad, tags[1]],
+                                            "bindings": {"modbus_tcp": {"tags": binding}}})
+    with pytest.raises(ValidationError, match="climate_power"):
+        ProductTemplate.model_validate({"tags": [tags[0] | {"ui": {"role": "toaster"}}],
+                                        "bindings": {"modbus_tcp": {"tags": {
+                                            "ac_power": binding["ac_power"]}}}})
+
+
 @pytest.mark.parametrize(("change", "message"), [
     ({"tags": [*RELAYS, POWER, POWER]}, "duplicate tag keys: power"),
     ({"tags": [*RELAYS, POWER | {"access": "read_write"}]}, "read-only"),

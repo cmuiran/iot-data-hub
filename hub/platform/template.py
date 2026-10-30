@@ -93,6 +93,10 @@ class TagUi(_Strict):
     order: int = Field(default=0, ge=0, le=100_000)
     group: str | None = Field(default=None, min_length=1, max_length=40)
     icon: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,39}$")
+    # the tags of one air conditioner / thermostat (the same ``group``, or the device's only
+    # set): the app shows them as one climate panel (on/off, mode, set point, fan speed, room)
+    role: Literal["climate_power", "climate_mode", "climate_setpoint", "climate_fan",
+                  "climate_temp"] | None = None
 
 
 class TagDefinition(_Strict):
@@ -240,7 +244,38 @@ class ProductTemplate(_Strict):
         ckeys = [c.key for c in self.commands]
         if len(set(ckeys)) != len(ckeys):
             raise ValueError("duplicate command keys")
+        self._check_climate()
         return self
+
+    def _check_climate(self) -> None:
+        """A climate role is a promise to the app (it shows a control for it), so the tag must
+        be able to do it: power a controllable bool, mode and fan controllable with their
+        states, the set point a controllable number with its range, the room a number; one tag
+        per role in each group."""
+        seen: set[tuple[str | None, str]] = set()
+        for t in self.tags:
+            role = t.ui.role
+            if role is None:
+                continue
+            if (t.ui.group, role) in seen:
+                raise ValueError(f"{t.key}: a second {role} in the same group")
+            seen.add((t.ui.group, role))
+            writable = t.access is Access.READ_WRITE
+            numeric = t.data_type in NUMERIC_TYPES
+            if role == "climate_power":
+                ok = writable and t.data_type is DataType.BOOL
+                need = "a controllable bool"
+            elif role in ("climate_mode", "climate_fan"):
+                ok = writable and t.data_type in INTEGER_RANGES and bool(t.states)
+                need = "a controllable integer with its states (0=cool, 1=heat, ...)"
+            elif role == "climate_setpoint":
+                ok = writable and numeric and t.min is not None and t.max is not None
+                need = "a controllable number with min and max"
+            else:
+                ok = numeric
+                need = "a number"
+            if not ok:
+                raise ValueError(f"{t.key}: {role} needs {need}")
 
     def _check_formulas(self) -> None:
         calc = calc_device(self, "dtemplatecheck000000000", "check")

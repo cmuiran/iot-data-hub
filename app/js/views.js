@@ -2,7 +2,8 @@
 
 import { commandsSection, deleteAccount, groupsRow, newHome, sharesList, smsSection, ticketsSection,
   timersSection } from "./more.js";
-import { favoritesRow, outButton, smsSheet } from "./outputs.js";
+import { favoritesRow, outButton, sensorRow, smsSheet } from "./outputs.js";
+import { climateCard, climateKeys, climateSets } from "./climate.js";
 import { api, changed, loading, dialog, errorText, h, home, icon, imageUrl, lang, loadLanguage, logout, name, num,
   saved, SCENE_TONE, session, setAccent, t, toast, when } from "./core.js";
 
@@ -407,9 +408,12 @@ export function device(state, id) {
     try { view = await api("GET", `/api/platform/my/devices/${id}/view`); }
     catch (err) { page.replaceChildren(header(""), h("p", {}, errorText(err))); return; }
     const d = view.device;
-    const outputs = view.tags.filter((x) => x.writable && x.data_type === "bool");
-    const params = view.tags.filter((x) => x.writable && x.data_type !== "bool");
-    const readings = view.tags.filter((x) => !x.writable);
+    const climates = climateSets(view);              // an AC / thermostat gets its own panel
+    const inClimate = climateKeys(climates);
+    const rest0 = view.tags.filter((x) => !inClimate.has(x.key));
+    const outputs = rest0.filter((x) => x.writable && x.data_type === "bool");
+    const params = rest0.filter((x) => x.writable && x.data_type !== "bool");
+    const readings = rest0.filter((x) => !x.writable);
     const sub = [d.room, view.product].filter(Boolean).join(" · ");
     const gear = h("a", { class: "icon-btn", href: `#/device/${id}/settings`, "aria-label": t("device.settings_page") },
       icon("gear"));
@@ -423,6 +427,9 @@ export function device(state, id) {
         d.warranty_until ? h("span", { class: "chip" }, t("device.warranty_until", { date: jalali(d.warranty_until) }))
           : null,
         d.access !== "owner" ? h("span", { class: "chip accent" }, t(`access.${d.access}`)) : null)];
+    for (const set of climates) {
+      parts.push(climateCard(id, set, draw, { online: online(d), canWrite: d.access !== "viewer" }));
+    }
     if (outputs.length) {
       const onCount = outputs.filter((x) => x.value === true).length;
       const allOn = h("button", { class: "btn primary" }, t("device.all_on"));
@@ -449,7 +456,7 @@ export function device(state, id) {
             { n: num(onCount), total: num(outputs.length) })), naming)),
         editing ? h("p", { class: "tiny muted lh" }, t("out.edit_hint")) : null,
         h("div", { class: "outputs" }, outputs.map((x) => outButton(id, x, draw,
-          { disabled: !editing && !online(d), editing }))),
+          { editing, offline: !online(d) }))),
         outputs.length > 1 ? h("div", { class: "two" }, allOn, allOff) : null, sms));
       if (!online(d)) {
         parts.push(h("a", { class: "card tight row link-card warn-card", href: `#/device/${id}/settings` },
@@ -468,7 +475,7 @@ export function device(state, id) {
     const rest = readings.filter((x) => x !== chartTag);
     if (rest.length) {
       parts.push(h("section", { class: "stack" }, h("h2", { class: "h2" }, t("device.readings")),
-        rest.map((x) => h("div", { class: "reading" },
+        rest.map((x) => x.data_type === "bool" ? sensorRow(id, x) : h("div", { class: "reading" },
           h("span", { class: "muted" }, name(x.display_name)),
           changed(h("b", {}, display(x), " ", h("span", { class: "small muted" }, x.unit || "")),
             `r:${id}:${x.key}`, x.value)))));

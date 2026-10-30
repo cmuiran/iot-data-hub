@@ -296,6 +296,15 @@ export default async function productPage(args) {
       const chart = checkbox(t("io.chart"), tag.ui.chart !== false);
       const scenario = checkbox(t("io.scenario"), tag.ui.scenario !== false);
       const description = input({ value: tag.description || "", disabled: !manage });
+      const ROLES = ["", "climate_power", "climate_mode", "climate_setpoint", "climate_fan", "climate_temp"];
+      const role = select(ROLES.map((r) => [r, t(`io.role_${r || "none"}`)]), { value: tag.ui.role || "", disabled: !manage });
+      const uiGroup = input({ value: tag.ui.group || "", maxlength: 40, disabled: !manage, placeholder: t("io.group_hint") });
+      // the icon the buyer's app shows: outputs (lamp, fan, ...) and inputs a module carries
+      // (a 433 MHz remote, PIR, magnet, smoke detector, IR, a missed call that runs a command)
+      const ICONS = ["", "bulb", "chandelier", "lamp", "fan", "snow", "flame", "plug", "tv", "curtain", "door",
+        "lock", "water", "pump", "leaf", "bell", "motion", "magnet", "smoke", "remote", "ir", "call", "siren",
+        "thermo", "sensor", "bolt"];
+      const uiIcon = select(ICONS.map((n) => [n, t(`io.icon_${n || "none"}`)]), { value: tag.ui.icon || "", disabled: !manage });
       const formula = h("textarea", { class: "input mono ltr", rows: 2, disabled: !manage,
         placeholder: "integrate(power)" }, tag.formula || "");
       const formulaBox = h("div", { class: `span ${tag.kind === "calculated" ? "" : "hidden"}` },
@@ -346,7 +355,8 @@ export default async function productPage(args) {
         tag.default = raw === "" ? null : tag.data_type === "bool" ? raw === "true" || raw === "1"
           : tag.data_type === "string" ? raw : Number(raw);
         tag.ui = { ...tag.ui, order: Number(order.value) || 0, visible: visible.box.checked,
-          chart: chart.box.checked, scenario: scenario.box.checked };
+          chart: chart.box.checked, scenario: scenario.box.checked,
+          role: role.value || null, group: uiGroup.value.trim() || null, icon: uiIcon.value || null };
         state.sel = tag.key;
         changed();
         refresh();
@@ -374,6 +384,8 @@ export default async function productPage(args) {
           h("div", { class: "span" }, field(t("io.states"), states, t("io.states_help"))),
           formulaBox,
           field(t("io.default"), def), field(t("io.description"), description),
+          field(t("io.role"), role, t("io.role_help")), field(t("io.group"), uiGroup),
+          field(t("io.icon"), uiIcon, t("io.icon_help")),
           h("div", { class: "span row wrap" }, visible.el, chart.el, scenario.el)),
         h("div", { class: "row between" }, remove, apply));
     }

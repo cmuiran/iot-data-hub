@@ -1,6 +1,6 @@
 // Service worker: the app shell works offline (network first, the cache when offline); never the API.
-const CACHE = "app-shell-v6";
-const SHELL = ["./", "index.html", "css/app.css", "js/main.js", "js/core.js", "js/views.js", "js/auto.js", "js/more.js", "js/outputs.js",
+const CACHE = "app-shell-v7";
+const SHELL = ["./", "index.html", "css/app.css", "js/main.js", "js/core.js", "js/views.js", "js/auto.js", "js/more.js", "js/outputs.js", "js/climate.js", "js/picker.js",
   "i18n/fa.json", "i18n/en.json", "icon.svg", "manifest.webmanifest", "fonts/Vazirmatn.woff2"];
 
 self.addEventListener("install", (event) => {

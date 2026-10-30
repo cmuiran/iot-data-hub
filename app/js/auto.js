@@ -71,8 +71,11 @@ export function describe(def, views) {
     when.push(["ok", t(tr.event === "arrive" ? "auto.when_arrive" : "auto.when_leave")]);
   } else {
     const { v } = tagOf(views, tr.device_id, "");
-    when.push(["ok", t("auto.when_offline_x", { device: v ? v.device.name : "",
-      n: num(Math.round((tr.for_s || 60) / 60)) })]);
+    when.push(["ok", tr.event === "online" ? t("auto.when_online_x", { device: v ? v.device.name : "" })
+      : t("auto.when_offline_x", { device: v ? v.device.name : "", n: num(Math.round((tr.for_s || 60) / 60)) })]);
+  }
+  if (tr.start || tr.end) {
+    when.push(["violet", t("auto.range_x", { a: tr.start ? num(tr.start) : "…", b: tr.end ? num(tr.end) : "…" })]);
   }
   const and = [];
   for (const c of def.conditions || []) {
@@ -93,7 +96,9 @@ export function describe(def, views) {
     }
     if (a.type === "scene") return t("auto.run_scene");
     if (a.type === "delay") return t("auto.wait", { n: num(a.seconds) });
-    return t("auto.notify_x", { text: a.text });
+    if (a.type === "cycle") return t("auto.cycle_x", { x: tagName(views, a.device_id, a.tag) });
+    const via = (a.channels || ["email"]).map((c) => t(`auto.via_${c}`)).join("، ");
+    return `${t("auto.notify_x", { text: a.text })} (${via})`;
   });
   return { when, and, then };
 }
@@ -112,7 +117,8 @@ export function automationsPage(tab = "scenes") {
       if (!org) { body.replaceChildren(h("p", { class: "muted" }, t("auto.no_home"))); return; }
       [views, scenes, autos] = await Promise.all([catalog(),
         api("GET", `/api/platform/organizations/${org}/scenes`),
-        api("GET", `/api/platform/organizations/${org}/automations`)]);
+        api("GET", `/api/platform/organizations/${org}/automations`)
+          .then((rows) => rows.filter((a) => !a.definition?.timer))]);    // timers: on the device page
     } catch (err) {
       body.replaceChildren(h("p", {}, errorText(err)));
       return;
@@ -280,8 +286,17 @@ function actionRow(views, scenes, initial, allowed, remove) {
     } else {
       const text = h("input", { class: "input", value: initial?.type === "notify" ? initial.text : "",
         placeholder: t("auto.notify_hint"), "aria-label": t("auto.notify_text") });
-      box.replaceChildren(text);
-      read = () => (text.value.trim() ? { type: "notify", text: text.value.trim() } : null);
+      const had = new Set(initial?.type === "notify" ? initial.channels || ["email"] : ["email"]);
+      const boxes = [["email", "out"], ["sms", "chat"], ["call", "call"]].map(([c, ic]) => {
+        const cb = h("input", { type: "checkbox", checked: had.has(c) });
+        return [c, cb, h("label", { class: "check-row chip-check" }, cb, icon(ic), h("span", { class: "small" }, t(`auto.via_${c}`)))];
+      });
+      box.replaceChildren(text, h("div", { class: "row wrap" }, boxes.map((b) => b[2])),
+        h("span", { class: "tiny muted lh" }, t("auto.via_help")));
+      read = () => {
+        const channels = boxes.filter((b) => b[1].checked).map((b) => b[0]);
+        return text.value.trim() ? { type: "notify", text: text.value.trim(), channels: channels.length ? channels : ["email"] } : null;
+      };
     }
   };
   kind.addEventListener("change", () => { initial = null; drawBox(); });
@@ -316,8 +331,13 @@ async function sceneBuilder(org, views, scene, done) {
     "aria-label": t(`icons.${x}`), onclick: () => { iconName = x; drawIcons(); } }, icon(x))));
   drawIcons();
   const actions = actionList(views, [], scene?.actions || [], ["write", "delay"]);
+  const keyword = h("input", { class: "input", value: scene?.sms_keyword || "", maxlength: 20,
+    placeholder: t("auto.keyword_hint"), "aria-label": t("auto.keyword") });
   const body = h("div", { class: "stack" }, labelled(t("auto.name"), nameIn),
-    labelled(t("auto.icon"), icons), h("span", { class: "label" }, t("auto.scene_actions")), actions.el);
+    labelled(t("auto.icon"), icons), h("span", { class: "label" }, t("auto.scene_actions")), actions.el,
+    h("details", { class: "more", open: Boolean(scene?.sms_keyword) }, h("summary", {}, t("auto.keyword")),
+      h("div", { class: "stack" }, keyword, h("span", { class: "tiny muted lh" }, t("auto.keyword_help")),
+        h("a", { class: "link small", href: `#/home-settings/${org}` }, t("auto.keyword_setup")))));
   const buttons = [["cancel", t("common.cancel")], ["save", t("auto.save"), "primary"]];
   if (scene) buttons.unshift(["delete", t("auto.delete"), "danger"]);
   for (;;) {
@@ -329,7 +349,8 @@ async function sceneBuilder(org, views, scene, done) {
       return;
     }
     if (answer !== "save") return;
-    const payload = { name: nameIn.value.trim() || t("auto.untitled"), icon: iconName, actions: actions.read() };
+    const payload = { name: nameIn.value.trim() || t("auto.untitled"), icon: iconName, actions: actions.read(),
+      sms_keyword: keyword.value.trim() || null };
     try {
       if (scene) await api("PUT", `/api/platform/organizations/${org}/scenes/${scene.scene_id}`, payload);
       else await api("POST", `/api/platform/organizations/${org}/scenes`, payload);
@@ -391,6 +412,18 @@ async function autoBuilder(org, views, scenes, record, done) {
   const tDays = dayChips(tr.type === "time" ? tr.weekdays : null);
   const holidays = select([["any", t("auto.holidays_any")], ["skip", t("auto.holidays_skip")],
     ["only", t("auto.holidays_only")]], t("auto.holidays"), tr.holidays || "any");
+  // the days the schedule is in force: from / until (Jalali), empty = always
+  const jIn = (v, label) => h("input", { class: "input ltr", value: v || "", placeholder: "1405/09/01", "aria-label": label });
+  const rangeFrom = jIn(tr.start, t("auto.range_from"));
+  const rangeTo = jIn(tr.end, t("auto.range_to"));
+  const range = h("div", { class: "stack" }, h("div", { class: "two" }, labelled(t("auto.range_from"), rangeFrom),
+    labelled(t("auto.range_to"), rangeTo)), h("span", { class: "tiny muted" }, t("auto.range_help")));
+  const latin = (v) => v.trim().replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d));
+  const withRange = (trigger) => {
+    if (rangeFrom.value.trim()) trigger.start = latin(rangeFrom.value);
+    if (rangeTo.value.trim()) trigger.end = latin(rangeTo.value);
+    return trigger;
+  };
   boxes.time = h("div", { class: "stack" }, labelled(t("auto.at"), at), tDays.el, labelled(t("auto.holidays"), holidays));
   // interval
   const every = h("input", { class: "input ltr", type: "number", min: 1, max: 1440, value: tr.every_min || 15,
@@ -415,7 +448,9 @@ async function autoBuilder(org, views, scenes, record, done) {
     tr.type === "offline" ? tr.device_id : null);
   const offMin = h("input", { class: "input ltr", type: "number", min: 1, max: 1440,
     value: tr.type === "offline" ? Math.round((tr.for_s || 60) / 60) : 5, "aria-label": t("auto.for_min") });
-  boxes.offline = h("div", { class: "stack" }, devSel, labelled(t("auto.for_min"), offMin));
+  const offEvent = select([["offline", t("auto.went_offline")], ["online", t("auto.came_online")]], t("auto.device_event"),
+    tr.type === "offline" ? tr.event || "offline" : "offline");
+  boxes.offline = h("div", { class: "stack" }, devSel, offEvent, labelled(t("auto.for_min"), offMin));
   // once
   const date = h("input", { class: "input ltr", value: tr.date || "", placeholder: "1405/08/15", "aria-label": t("auto.date") });
   const onceAt = h("input", { class: "input ltr", type: "time", value: tr.type === "once" ? tr.at : "08:00",
@@ -444,7 +479,8 @@ async function autoBuilder(org, views, scenes, record, done) {
   boxes.presence = h("div", { class: "stack" }, presence,
     h("span", { class: "tiny muted lh" }, t("auto.presence_help")));
   const triggerBox = h("div");
-  const showTrigger = () => triggerBox.replaceChildren(boxes[kind.value]);
+  const showTrigger = () => triggerBox.replaceChildren(boxes[kind.value],
+    ...(["time", "interval", "sun"].includes(kind.value) ? [range] : []));
   kind.addEventListener("change", showTrigger);
   showTrigger();
 
@@ -492,21 +528,24 @@ async function autoBuilder(org, views, scenes, record, done) {
       const d = tDays.read();
       if (d) trigger.weekdays = d;
       if (holidays.value !== "any") trigger.holidays = holidays.value;
+      withRange(trigger);
     } else if (kind.value === "interval") {
-      trigger = { type: "interval", every_min: Number(every.value) || 15 };
+      trigger = withRange({ type: "interval", every_min: Number(every.value) || 15 });
       if (iFrom.value && iTo.value) trigger.between = [iFrom.value, iTo.value];
     } else if (kind.value === "value") {
       const [device_id, tag] = source.value.split("|");
       trigger = { type: "value", device_id, tag, op: op.value,
         value: parseValue(threshold.value, tagOf(views, device_id, tag).tag), for_s: (Number(forMin.value) || 0) * 60 };
     } else if (kind.value === "offline") {
-      trigger = { type: "offline", device_id: devSel.value, for_s: Math.max(10, (Number(offMin.value) || 1) * 60) };
+      trigger = { type: "offline", device_id: devSel.value, event: offEvent.value,
+        for_s: offEvent.value === "online" ? 0 : Math.max(10, (Number(offMin.value) || 1) * 60) };
     } else if (kind.value === "sun") {
       if (place.latitude === null) throw new Error(t("auto.sun_no_place"));
       trigger = { type: "sun", event: sunEvent.value, offset_min: Number(sunOffset.value) || 0,
         latitude: place.latitude, longitude: place.longitude };
       const d = sDays.read();
       if (d) trigger.weekdays = d;
+      withRange(trigger);
     } else if (kind.value === "presence") {
       trigger = { type: "presence", event: presence.value };
     } else {

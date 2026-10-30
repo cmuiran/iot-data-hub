@@ -3,6 +3,7 @@
 import { api, busy, errorText, h, icon, lang, loadLanguage, logout, saved, session, t,
   toast } from "./core.js";
 import { ctx } from "./ui.js";
+import { startPickers } from "./picker.js";
 
 const root = document.getElementById("root");
 const VIEWS = {
@@ -168,4 +169,5 @@ window.addEventListener("unhandledrejection", (ev) => toast(errorText(ev.reason)
 
 await loadLanguage(saved.get("lang") || "fa");
 document.title = t("shell.title");
+startPickers({ h, icon: (n) => icon(n, 18), t, sheetClass: "dialog" });
 render();

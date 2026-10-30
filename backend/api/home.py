@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.platform import TEHRAN, OrgQuery, _mine, _my_level, _my_orgs, _number
 from backend.deps import ServicesDep, client_addr, require
-from backend.errors import Forbidden, Invalid, NotFound
+from backend.errors import Conflict, Forbidden, Invalid, NotFound
 from backend.rbac import Principal
 from backend.security import verify_password
 from hub import jalali
@@ -232,6 +232,9 @@ class LabelIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=40)
     icon: str | None = Field(default=None, pattern=ICON)
     favorite: bool = False
+    # toggle: one key; dual: separate on and off keys; momentary: a push (on, then off)
+    mode: Literal["toggle", "dual", "momentary"] = "toggle"
+    pulse_s: float | None = Field(default=None, gt=0, le=600)
 
 
 @router.put("/api/platform/my/devices/{device_id}/labels/{key}")
@@ -248,19 +251,228 @@ async def save_label(device_id: str, key: str, body: LabelIn, svc: ServicesDep,
     if owner is None or key not in {t.key for t in template.tags}:
         raise NotFound("output not found")
     name = body.name.strip() if body.name and body.name.strip() else None
+    pulse = (body.pulse_s or 1.0) if body.mode == "momentary" else None
     await svc.store.home.save_label(owner, device_id, key, name=name, icon=body.icon,
-                                    favorite=body.favorite)
+                                    favorite=body.favorite, mode=body.mode, pulse_s=pulse)
     return {"device_id": device_id, "key": key, "name": name, "icon": body.icon,
-            "favorite": body.favorite}
+            "favorite": body.favorite, "mode": body.mode, "pulse_s": pulse}
+
+
+class PulseIn(BaseModel):
+    tag: str = Field(pattern=f"^{SEGMENT_PATTERN}$")
+    seconds: float = Field(default=1.0, gt=0, le=600)
+
+
+_PULSES: set[asyncio.Task[Any]] = set()
+
+
+@router.post("/api/platform/my/devices/{device_id}/pulse")
+async def pulse(device_id: str, body: PulseIn, svc: ServicesDep, p: Viewer) -> dict[str, Any]:
+    """A momentary key (a door opener, a bell): on now and off after ``seconds``, both
+    through the control-safety layer with the caller's rights. The hub turns it off even if
+    the app is closed meanwhile."""
+    if await _my_level(svc, p, device_id, "device.operate") not in ("owner", "operator"):
+        raise NotFound("device not found")
+    path = f"platform.devices.{device_id}.{body.tag}"
+    result = await svc.control.request_write(p, path, True, "app: momentary", None)
+    if result.result != "applied":
+        return {"result": result.result, "message": result.message}
+
+    async def release() -> None:
+        await asyncio.sleep(body.seconds)
+        # the safety layer keeps a minimum time between two writes of one output: a push
+        # shorter than that is released as soon as it allows (never left on)
+        for _ in range(30):
+            try:
+                r = await svc.control.request_write(p, path, False, "app: momentary release",
+                                                    None)
+            except Exception:  # noqa: BLE001 - logged; the device's own state shows it
+                log.exception("momentary release of %s failed", path)
+                return
+            if r.result != "rejected_rate":
+                if r.result != "applied":
+                    log.warning("momentary release of %s: %s", path, r.result)
+                return
+            await asyncio.sleep(0.5)
+
+    task = asyncio.create_task(release(), name=f"pulse:{path}")
+    _PULSES.add(task)
+    task.add_done_callback(_PULSES.discard)
+    return {"result": "applied", "seconds": body.seconds}
+
+
+# --- the home's SMS / call contacts, its SMS PIN, SMS commands -----------------------------------
+
+PHONE = r"^\+?[0-9]{6,15}$"
+
+
+class ContactIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    phone: str = Field(pattern=PHONE)
+    sms: bool = True                    # alerts by SMS
+    call: bool = False                  # alerts by a voice call
+    command: bool = False               # may run scenes by an SMS keyword (with the PIN)
+
+
+@router.get("/api/platform/organizations/{org_id}/contacts")
+async def contacts(org_id: str, svc: ServicesDep, p: Viewer) -> dict[str, Any]:
+    """Who the home alerts by SMS or call, and whether SMS commands are set up."""
+    _member(p, org_id, "org.members")
+    return {"contacts": [c.model_dump() for c in await svc.store.home.contacts(org_id)],
+            "pin_set": bool(await svc.store.home.sms_pin_hash(org_id)),
+            "gateway": bool(getattr(svc.sms, "enabled", False))}
+
+
+async def _save_contact(svc: ServicesDep, p: Principal, org_id: str, contact_id: int | None,
+                        body: ContactIn, request: Request) -> dict[str, Any]:
+    _member(p, org_id, "org.members")
+    from backend.sms import normalize_phone
+
+    if contact_id is None and len(await svc.store.home.contacts(org_id)) >= 10:
+        raise Invalid("a home has 10 contacts at most", code="too_many")
+    try:
+        record = await svc.store.home.save_contact(
+            org_id, contact_id, name=body.name.strip(), phone=normalize_phone(body.phone),
+            sms=body.sms, call=body.call, command=body.command, user_id=p.user_id)
+    except Exception as exc:  # noqa: BLE001 - the unique (home, phone)
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise Conflict("this number is already a contact of the home",
+                           code="duplicate_phone") from None
+        raise
+    if record is None:
+        raise NotFound("contact not found")
+    await svc.store.add_auth_audit("contact_saved", p.username, user_id=p.user_id,
+                                   client_addr=client_addr(request),
+                                   detail={"org_id": org_id, "contact_id": record.contact_id})
+    return record.model_dump()
+
+
+@router.post("/api/platform/organizations/{org_id}/contacts", status_code=201)
+async def create_contact(org_id: str, body: ContactIn, svc: ServicesDep, p: Viewer,
+                         request: Request) -> dict[str, Any]:
+    return await _save_contact(svc, p, org_id, None, body, request)
+
+
+@router.put("/api/platform/organizations/{org_id}/contacts/{contact_id}")
+async def update_contact(org_id: str, contact_id: int, body: ContactIn, svc: ServicesDep,
+                         p: Viewer, request: Request) -> dict[str, Any]:
+    return await _save_contact(svc, p, org_id, contact_id, body, request)
+
+
+@router.delete("/api/platform/organizations/{org_id}/contacts/{contact_id}", status_code=204)
+async def delete_contact(org_id: str, contact_id: int, svc: ServicesDep, p: Viewer,
+                         request: Request) -> None:
+    _member(p, org_id, "org.members")
+    if not await svc.store.home.delete_contact(org_id, contact_id):
+        raise NotFound("contact not found")
+    await svc.store.add_auth_audit("contact_deleted", p.username, user_id=p.user_id,
+                                   client_addr=client_addr(request),
+                                   detail={"org_id": org_id, "contact_id": contact_id})
+
+
+class PinIn(BaseModel):
+    pin: str | None = Field(default=None, pattern=r"^[0-9]{4,8}$")   # None: SMS commands off
+
+
+@router.put("/api/platform/organizations/{org_id}/sms-pin", status_code=204)
+async def set_sms_pin(org_id: str, body: PinIn, svc: ServicesDep, p: Viewer,
+                      request: Request) -> None:
+    """The PIN an SMS command must carry (``شب 4821``); kept only as a hash."""
+    _member(p, org_id, "org.members")
+    from backend.security import hash_password
+
+    await svc.store.home.set_sms_pin_hash(org_id, hash_password(body.pin) if body.pin else None)
+    await svc.store.add_auth_audit("sms_pin_set", p.username, user_id=p.user_id,
+                                   client_addr=client_addr(request),
+                                   detail={"org_id": org_id, "on": body.pin is not None})
+
+
+_SMS_TRIES: dict[str, list[float]] = {}
+
+
+def _sms_throttled(phone: str, now: float) -> bool:
+    """Five SMS commands per number in ten minutes (a guessed PIN costs time and money)."""
+    tries = [t for t in _SMS_TRIES.get(phone, []) if now - t < 600]
+    tries.append(now)
+    _SMS_TRIES[phone] = tries[-20:]
+    return len(tries) > 5
+
+
+@router.post("/api/sms/inbound")
+async def sms_inbound(request: Request, svc: ServicesDep,
+                      token: Annotated[str | None, Query(max_length=200)] = None
+                      ) -> dict[str, Any]:
+    """The SMS provider forwards each received SMS here (``?token=HUB_SMS_INBOUND_TOKEN``;
+    form or JSON with ``from`` and ``message``). A contact of a home marked for commands runs
+    one of the home's scenes by its keyword and the home's PIN, in either order:
+    ``شب 4821``. The sender is answered by SMS; anything else is answered by nothing."""
+    import time as _time
+
+    from backend.security import verify_password
+    from backend.sms import normalize_phone
+
+    expected = svc.settings.sms_inbound_token
+    if not expected or not token or not hmac.compare_digest(token, expected):
+        raise Forbidden("bad token", code="forbidden")
+    raw = (await request.body())[:4096]
+    if "json" in request.headers.get("content-type", ""):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {"result": "ignored"}
+        if not isinstance(data, dict):
+            return {"result": "ignored"}
+    else:                                        # form-encoded, or the query string (GET-style)
+        from urllib.parse import parse_qsl
+
+        data = dict(parse_qsl(raw.decode("utf-8", "replace"))) | {
+            k: v for k, v in request.query_params.items() if k != "token"}
+    sender = normalize_phone(str(data.get("from") or data.get("sender") or ""))
+    words = str(data.get("message") or data.get("text") or "").split()
+    if not sender or len(words) != 2 or _sms_throttled(sender, _time.monotonic()):
+        return {"result": "ignored"}
+    pin, keyword = (words[0], words[1]) if words[0].isdigit() else (words[1], words[0])
+    for contact in await svc.store.home.contacts_by_phone([sender]):
+        if not contact.command:
+            continue
+        pin_hash = await svc.store.home.sms_pin_hash(contact.org_id)
+        if not pin_hash or not verify_password(pin_hash, pin):
+            await svc.store.add_auth_audit("sms_command_refused", f"sms:{contact.contact_id}",
+                                           detail={"org_id": contact.org_id})
+            continue
+        scenes = await svc.store.automations.scenes(None, contact.org_id)
+        scene = next((s for s in scenes if s.sms_keyword and
+                      s.sms_keyword.casefold() == keyword.casefold()), None)
+        if scene is None:
+            await svc.sms.send(sender, f"«{keyword}»: ?")
+            return {"result": "unknown_keyword"}
+        owner = await svc.automations._creator(scene.created_by) if scene.created_by else None
+        if owner is None:
+            return {"result": "failed"}
+        detail = await svc.automations.run_scene(owner, scene)
+        ok = all(d.get("result") in ("applied", "ok") for d in detail)
+        await svc.store.add_auth_audit("sms_command", f"sms:{contact.contact_id}",
+                                       detail={"org_id": contact.org_id,
+                                               "scene_id": scene.scene_id, "ok": ok})
+        await svc.sms.send(sender, f"{scene.name}: {'✓' if ok else '✗'}")
+        return {"result": "ok" if ok else "partial", "scene_id": scene.scene_id}
+    return {"result": "ignored"}
 
 
 # --- countdown timers ----------------------------------------------------------------------------
 
 
 class TimerIn(BaseModel):
+    """``once``: set ``value`` in ``minutes``. ``cycle``: starting in ``minutes`` (0 = now),
+    on for ``on_s`` and off for ``off_s``, ``count`` times (0 = until cancelled)."""
+
     tag: str = Field(pattern=f"^{SEGMENT_PATTERN}$")
-    value: bool | int | float
-    minutes: int = Field(ge=1, le=24 * 60)
+    mode: Literal["once", "cycle"] = "once"
+    value: bool | int | float = False
+    minutes: int = Field(default=1, ge=0, le=24 * 60)
+    on_s: float = Field(default=60, ge=1, le=86_400)
+    off_s: float = Field(default=60, ge=1, le=86_400)
+    count: int = Field(default=0, ge=0, le=10_000)
 
 
 async def _operating_org(svc: ServicesDep, p: Principal, device_id: str) -> str:
@@ -281,20 +493,28 @@ async def create_timer(device_id: str, body: TimerIn, svc: ServicesDep, p: Viewe
     from backend.automations import AutomationIn
 
     org_id = await _operating_org(svc, p, device_id)
+    if body.mode == "once" and body.minutes < 1:
+        raise Invalid("a timer runs in 1 minute at the soonest", code="too_soon")
     at = (svc.hub.clock() + timedelta(minutes=body.minutes)).astimezone(TEHRAN)
     jy, jm, jd = jalali.to_jalali(at.date())
+    action: dict[str, Any] = {"type": "write", "device_id": device_id, "tag": body.tag,
+                              "value": body.value}
+    if body.mode == "cycle":
+        action = {"type": "cycle", "device_id": device_id, "tag": body.tag, "on_s": body.on_s,
+                  "off_s": body.off_s, "count": body.count}
     spec = AutomationIn.model_validate({
         "name": f"timer {body.tag}", "trigger": {"type": "once", "date": jalali.fmt(jy, jm, jd),
                                                  "at": at.strftime("%H:%M")},
-        "actions": [{"type": "write", "device_id": device_id, "tag": body.tag,
-                     "value": body.value}],
-        "missed": "catch_up", "catch_up_min": 60, "respect_manual_min": 0, "timer": True})
+        "actions": [action], "missed": "catch_up", "catch_up_min": 60,
+        "respect_manual_min": 0, "timer": True})
     await _check_automation(svc, org_id, spec)
     record = await svc.store.automations.save_automation(
         None, org_id, None, name=spec.name, enabled=True, definition=spec.definition(),
         user_id=p.user_id)
+    if body.minutes == 0:                        # a cycle that starts now
+        svc.automations.launch(record, spec, f"timer:{record.automation_id}")
     return {"automation_id": record.automation_id, "at": at.isoformat(), "tag": body.tag,
-            "value": body.value}
+            "mode": body.mode, "value": body.value}
 
 
 @router.get("/api/platform/my/devices/{device_id}/timers")
@@ -312,9 +532,14 @@ async def timers(device_id: str, svc: ServicesDep, p: Viewer) -> list[dict[str, 
                 tr = d["trigger"]
                 at = datetime.combine(jalali.to_gregorian(*jalali.parse(tr["date"])),
                                       datetime.strptime(tr["at"], "%H:%M").time(), TEHRAN)
-                out.append({"automation_id": a.automation_id, "org_id": a.org_id,
-                            "tag": actions[0]["tag"], "value": actions[0]["value"],
-                            "at": at.isoformat()})
+                first = actions[0]
+                item = {"automation_id": a.automation_id, "org_id": a.org_id,
+                        "tag": first["tag"], "value": first.get("value"), "at": at.isoformat(),
+                        "mode": "cycle" if first["type"] == "cycle" else "once",
+                        "running": a.automation_id in svc.automations._running}
+                if first["type"] == "cycle":
+                    item |= {k: first[k] for k in ("on_s", "off_s", "count")}
+                out.append(item)
     return sorted(out, key=lambda x: x["at"])
 
 
@@ -324,6 +549,7 @@ async def cancel_timer(device_id: str, automation_id: int, svc: ServicesDep, p: 
         if t["automation_id"] == automation_id:
             _member(p, t["org_id"], "automation.manage")
             await svc.store.automations.delete_automation(None, t["org_id"], automation_id)
+            svc.automations.cancel(automation_id)       # a running cycle stops (output off)
             return
     raise NotFound("timer not found")
 
